@@ -2,3 +2,6 @@
 /.idea
 /.vscode
 /.git
+/.venv
+history.json
+video_history.json

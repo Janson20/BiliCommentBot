@@ -25,6 +25,13 @@ expire_time = 300
 # 是否启用缓存
 enabled = true
 
+# 视频列表缓存配置
+[video_cache]
+# 视频列表缓存时间（秒），默认12小时（43200秒）
+expire_time = 43200
+# 缓存文件路径
+cache_file = "video_cache.json"
+
 # DeepSeek API配置
 [deepseek]
 # DeepSeek API密钥

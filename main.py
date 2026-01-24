@@ -83,6 +83,14 @@ class BiliCommentBot:
         self.consecutive_failures = 0
         self.adaptive_interval = self.min_request_interval
         
+        # 视频列表缓存配置（12小时）
+        video_cache_config = self.config.get('video_cache', {})
+        self.cached_videos = []
+        self.last_video_fetch_time = 0
+        self.video_cache_file = video_cache_config.get('cache_file', 'video_cache.json')
+        self.video_cache_expire_time = video_cache_config.get('expire_time', 43200)  # 默认12小时
+        self.load_video_cache()
+        
         self.logger.info("B站评论自动回复机器人启动")
     
     def extract_csrf_token(self, cookie: str) -> Optional[str]:
@@ -143,6 +151,40 @@ class BiliCommentBot:
             self.logger.info(f"保存回复历史: {comment.comment_id}")
         except Exception as e:
             self.logger.error(f"保存历史记录失败: {e}")
+    
+    def load_video_cache(self):
+        """加载视频列表缓存"""
+        try:
+            if os.path.exists(self.video_cache_file):
+                with open(self.video_cache_file, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                    self.cached_videos = cache_data.get('videos', [])
+                    self.last_video_fetch_time = cache_data.get('fetch_time', 0)
+                    
+                    cache_age = (time.time() - self.last_video_fetch_time) / 3600  # 转换为小时
+                    self.logger.info(f"加载视频缓存，缓存{cache_age:.1f}小时，共{len(self.cached_videos)}个视频")
+            else:
+                self.logger.info("未找到视频缓存文件")
+        except Exception as e:
+            self.logger.error(f"加载视频缓存失败: {e}")
+            self.cached_videos = []
+            self.last_video_fetch_time = 0
+    
+    def save_video_cache(self, videos: List[Dict]):
+        """保存视频列表缓存"""
+        try:
+            cache_data = {
+                'videos': videos,
+                'fetch_time': int(time.time()),
+                'fetch_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            with open(self.video_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            
+            self.logger.info(f"保存视频缓存，共{len(videos)}个视频")
+        except Exception as e:
+            self.logger.error(f"保存视频缓存失败: {e}")
     
     def update_headers(self):
         """更新请求头，随机化特征"""
@@ -312,11 +354,23 @@ class BiliCommentBot:
             self.logger.addHandler(console_handler)
     
     def get_video_list(self) -> List[Dict]:
-        """获取用户的视频列表"""
+        """获取用户的视频列表（12小时缓存）"""
         uid = self.config['bilibili']['uid']
         if not uid:
             self.logger.error("未配置B站用户ID")
             return []
+        
+        current_time = time.time()
+        time_since_last_fetch = current_time - self.last_video_fetch_time
+        
+        # 检查缓存是否有效
+        if self.cached_videos and time_since_last_fetch < self.video_cache_expire_time:
+            remaining_hours = (self.video_cache_expire_time - time_since_last_fetch) / 3600
+            self.logger.info(f"使用视频列表缓存，{remaining_hours:.1f}小时后过期，共{len(self.cached_videos)}个视频")
+            return self.cached_videos
+        
+        # 缓存过期或不存在，重新获取
+        self.logger.info("视频列表缓存已过期，重新获取...")
         
         url = f"https://api.bilibili.com/x/space/arc/search"
         params = {
@@ -327,21 +381,36 @@ class BiliCommentBot:
         }
         
         try:
-            response = self.make_request_with_retry('GET', url, params=params)
+            response = self.make_request_with_retry('GET', url, params=params, use_cache=False)
             if not response:
+                # 如果获取失败，尝试使用旧缓存
+                if self.cached_videos:
+                    self.logger.warning("获取视频列表失败，使用过期缓存")
+                    return self.cached_videos
                 return []
             
             data = response.json()
             
             if data.get('code') == 0:
                 videos = data['data']['list']['vlist']
-                self.logger.info(f"获取到 {len(videos)} 个视频")
+                self.cached_videos = videos
+                self.last_video_fetch_time = current_time
+                self.save_video_cache(videos)
+                self.logger.info(f"成功获取视频列表，共 {len(videos)} 个视频")
                 return videos
             else:
                 self.logger.error(f"获取视频列表失败: {data.get('message')}")
+                # 如果获取失败，尝试使用旧缓存
+                if self.cached_videos:
+                    self.logger.warning("使用过期缓存")
+                    return self.cached_videos
                 return []
         except Exception as e:
             self.logger.error(f"获取视频列表异常: {e}")
+            # 如果获取失败，尝试使用旧缓存
+            if self.cached_videos:
+                self.logger.warning("使用过期缓存")
+                return self.cached_videos
             return []
     
     def get_video_comments(self, bvid: str) -> List[Comment]:

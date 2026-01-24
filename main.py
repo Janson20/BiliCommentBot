@@ -193,7 +193,8 @@ class BiliCommentBot:
             'Referer': random.choice(self.referers),
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
+            # 不设置Accept-Encoding，让requests库自动处理解压
+            # 'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Sec-Fetch-Dest': 'empty',
             'Sec-Fetch-Mode': 'cors',
@@ -257,12 +258,16 @@ class BiliCommentBot:
                 class MockResponse:
                     def __init__(self, data):
                         self.status_code = 200
-                        self.text = json.dumps(data)
+                        self.headers = {}
+                        self.text = json.dumps(data) if data else ""
                         self._json = data
                     
                     def json(self):
+                        if not self._json:
+                            raise json.JSONDecodeError("Empty content", "", 0)
                         return self._json
                 
+                self.logger.debug(f"使用缓存响应: {cache_key}")
                 return MockResponse(cached_data)
         
         for attempt in range(self.max_retries):
@@ -272,7 +277,7 @@ class BiliCommentBot:
                 
                 response = self.session.request(method, url, **kwargs)
                 
-                # 检查是否为频率限制错误
+                # 检查响应状态
                 if response.status_code == 429 or "请求过于频繁" in response.text:
                     self.consecutive_failures += 1
                     if attempt < self.max_retries - 1:
@@ -285,15 +290,34 @@ class BiliCommentBot:
                         self.logger.warning(f"请求过于频繁，{wait_time:.1f}秒后重试 (尝试 {attempt + 1}/{self.max_retries})")
                         time.sleep(wait_time)
                         continue
+                elif response.status_code >= 500:
+                    self.consecutive_failures += 1
+                    if attempt < self.max_retries - 1:
+                        wait_time = self.retry_delay * (2 ** attempt) + random.uniform(0, 2)
+                        self.logger.warning(f"服务器错误 {response.status_code}，{wait_time:.1f}秒后重试 (尝试 {attempt + 1}/{self.max_retries})")
+                        time.sleep(wait_time)
+                        continue
                 else:
                     self.consecutive_failures = 0  # 重置失败计数
+                
+                # 检查响应内容是否为空
+                if not response.text:
+                    self.logger.warning(f"响应内容为空，状态码: {response.status_code}")
+                    if attempt < self.max_retries - 1:
+                        wait_time = self.retry_delay * (2 ** attempt) + random.uniform(0, 2)
+                        self.logger.warning(f"{wait_time:.1f}秒后重试 (尝试 {attempt + 1}/{self.max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    return None
                 
                 # 缓存成功的GET请求响应
                 if use_cache and method.upper() == 'GET' and response.status_code == 200:
                     try:
-                        data = response.json()
-                        cache_key = self.get_cache_key(url, kwargs.get('params'))
-                        self.set_cache(cache_key, data)
+                        response_text = self.decompress_response(response)
+                        if response_text:
+                            data = json.loads(response_text)
+                            cache_key = self.get_cache_key(url, kwargs.get('params'))
+                            self.set_cache(cache_key, data)
                     except:
                         pass  # 如果不是JSON响应，忽略缓存
                 
@@ -375,7 +399,7 @@ class BiliCommentBot:
         url = f"https://api.bilibili.com/x/space/arc/search"
         params = {
             'mid': uid,
-            'ps': 30,
+            'ps': 20,
             'pn': 1,
             'order': 'pubdate'
         }
@@ -389,7 +413,26 @@ class BiliCommentBot:
                     return self.cached_videos
                 return []
             
-            data = response.json()
+            # 解压响应内容
+            response_text = self.decompress_response(response)
+            
+            if not response_text:
+                self.logger.error("获取视频列表失败，响应内容为空")
+                if self.cached_videos:
+                    self.logger.warning("使用过期缓存")
+                    return self.cached_videos
+                return []
+            
+            # 尝试解析JSON
+            try:
+                data = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                self.logger.error(f"视频列表JSON解析失败: {e}")
+                self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
+                if self.cached_videos:
+                    self.logger.warning("使用过期缓存")
+                    return self.cached_videos
+                return []
             
             if data.get('code') == 0:
                 videos = data['data']['list']['vlist']
@@ -413,44 +456,161 @@ class BiliCommentBot:
                 return self.cached_videos
             return []
     
-    def get_video_comments(self, bvid: str) -> List[Comment]:
-        """获取视频评论"""
-        url = "https://api.bilibili.com/x/v2/reply"
-        params = {
-            'type': 1,
-            'oid': self.bvid_to_aid(bvid),
-            'pn': 1,
-            'ps': 20,
-            'sort': 2  # 按时间排序
-        }
+    def decompress_response(self, response) -> str:
+        """解压响应内容"""
+        import gzip
+        import zlib
         
         try:
-            response = self.make_request_with_retry('GET', url, params=params)
-            if not response:
-                return []
+            # 如果response.text已经可用且不是乱码，直接返回
+            if hasattr(response, 'text') and response.text:
+                # 检查是否是有效的文本内容（不是二进制乱码）
+                try:
+                    # 尝试编码/解码来验证
+                    response.text.encode('utf-8').decode('utf-8')
+                    return response.text
+                except:
+                    pass
             
-            data = response.json()
+            # 获取原始内容
+            content = response.content if hasattr(response, 'content') else response.text
             
-            if data.get('code') == 0:
-                comments = []
-                for reply in data['data']['replies']:
-                    comment = Comment(
-                        comment_id=str(reply['rpid']),
-                        content=reply['content']['message'],
-                        user=reply['member']['uname'],
-                        uid=str(reply['member']['mid']),
-                        time=reply['ctime']
-                    )
-                    comments.append(comment)
-                
-                self.logger.info(f"视频 {bvid} 获取到 {len(comments)} 条评论")
-                return comments
+            if not content:
+                return ""
+            
+            # 检查是否是gzip压缩数据（gzip魔数：1f 8b）
+            if content[:2] == b'\x1f\x8b':
+                try:
+                    decompressed = gzip.decompress(content)
+                    return decompressed.decode('utf-8')
+                except Exception as e:
+                    self.logger.debug(f"gzip解压失败: {e}")
+            
+            # 检查是否是zlib/deflate压缩数据
+            try:
+                decompressed = zlib.decompress(content)
+                return decompressed.decode('utf-8')
+            except Exception as e:
+                self.logger.debug(f"zlib解压失败: {e}")
+            
+            # 尝试直接解码
+            if isinstance(content, bytes):
+                return content.decode('utf-8', errors='ignore')
             else:
-                self.logger.error(f"获取评论失败: {data.get('message')}")
-                return []
+                return str(content)
+            
         except Exception as e:
-            self.logger.error(f"获取评论异常: {e}")
+            self.logger.error(f"解压响应内容失败: {e}")
+            # 返回原始text（如果有）
+            if hasattr(response, 'text'):
+                return response.text
+            return ""
+    
+    def get_video_comments(self, bvid: str) -> List[Comment]:
+        """获取视频评论（遍历所有页）"""
+        url = "https://api.bilibili.com/x/v2/reply"
+        aid = self.bvid_to_aid(bvid)
+        
+        if not aid:
+            self.logger.error(f"视频 {bvid} 无法获取aid，跳过获取评论")
             return []
+        
+        all_comments = []
+        pn = 1
+        max_pn = 50  # 最大页数限制，防止无限循环
+        page_size = 20  # 每页评论数（B站API限制，建议使用较小的值）
+        
+        while pn <= max_pn:
+            params = {
+                'type': 1,
+                'oid': aid,
+                'pn': pn,
+                'ps': page_size,
+                'sort': 2  # 按时间排序
+            }
+            
+            try:
+                response = self.make_request_with_retry('GET', url, params=params)
+                if not response:
+                    self.logger.warning(f"视频 {bvid} 第{pn}页请求失败，停止获取")
+                    break
+                
+                # 解压响应内容
+                response_text = self.decompress_response(response)
+                
+                if not response_text:
+                    self.logger.error(f"视频 {bvid} 第{pn}页响应内容为空，停止获取")
+                    break
+                
+                # 记录响应内容的前200个字符用于调试
+                self.logger.debug(f"视频 {bvid} 第{pn}页响应内容预览: {response_text[:200]}")
+                
+                # 尝试解析JSON
+                try:
+                    data = json.loads(response_text)
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"视频 {bvid} 第{pn}页JSON解析失败: {e}")
+                    self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
+                    break
+                
+                if data.get('code') == 0:
+                    replies = data.get('data', {}).get('replies', [])
+                    
+                    if not replies:
+                        # 没有更多评论了
+                        self.logger.info(f"视频 {bvid} 第{pn}页无评论，停止获取")
+                        break
+                    
+                    # 解析当前页的评论
+                    for reply in replies:
+                        comment = Comment(
+                            comment_id=str(reply['rpid']),
+                            content=reply['content']['message'],
+                            user=reply['member']['uname'],
+                            uid=str(reply['member']['mid']),
+                            time=reply['ctime']
+                        )
+                        all_comments.append(comment)
+                    
+                    self.logger.info(f"视频 {bvid} 第{pn}页获取到 {len(replies)} 条评论，累计 {len(all_comments)} 条")
+                    
+                    # 检查是否还有更多页面
+                    page_info = data.get('data', {}).get('page', {})
+                    count = page_info.get('count', 0)  # 总评论数
+                    size = page_info.get('size', page_size)  # 每页大小
+                    
+                    # 如果当前页的评论数小于页面大小，说明没有更多评论了
+                    if len(replies) < size:
+                        self.logger.info(f"视频 {bvid} 已获取所有评论，共 {len(all_comments)} 条")
+                        break
+                    
+                    pn += 1
+                else:
+                    error_msg = data.get('message', '')
+                    # 检查是否是ps参数超限错误
+                    if 'ps out of bounds' in error_msg or '参数错误' in error_msg:
+                        self.logger.warning(f"视频 {bvid} page_size={page_size} 超出限制，尝试使用更小的值")
+                        # 如果第一页就失败且page_size > 10，尝试更小的值
+                        if pn == 1 and page_size > 10:
+                            page_size = max(10, page_size // 2)
+                            self.logger.info(f"视频 {bvid} 调整 page_size 为 {page_size}，重试")
+                            continue  # 使用新的page_size重试
+                        else:
+                            self.logger.error(f"视频 {bvid} 第{pn}页获取评论失败: {error_msg}")
+                            break
+                    else:
+                        self.logger.error(f"视频 {bvid} 第{pn}页获取评论失败: {error_msg}")
+                        break
+            except Exception as e:
+                self.logger.error(f"视频 {bvid} 第{pn}页获取评论异常: {e}")
+                break
+        
+        if all_comments:
+            self.logger.info(f"视频 {bvid} 总共获取到 {len(all_comments)} 条评论")
+        else:
+            self.logger.info(f"视频 {bvid} 暂无评论")
+        
+        return all_comments
     
     def bvid_to_aid(self, bvid: str) -> str:
         """将BV号转换为AV号"""
@@ -460,17 +620,36 @@ class BiliCommentBot:
         try:
             response = self.make_request_with_retry('GET', url, params=params)
             if not response:
-                return []
+                self.logger.error(f"BV号 {bvid} 转换失败，无响应")
+                return ""
             
-            data = response.json()
+            # 解压响应内容
+            response_text = self.decompress_response(response)
+            
+            if not response_text:
+                self.logger.error(f"BV号 {bvid} 转换失败，响应内容为空")
+                return ""
+            
+            # 尝试解析JSON
+            try:
+                data = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                self.logger.error(f"BV号 {bvid} JSON解析失败: {e}")
+                self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
+                return ""
             
             if data.get('code') == 0:
-                return str(data['data']['aid'])
+                aid = data.get('data', {}).get('aid')
+                if aid:
+                    return str(aid)
+                else:
+                    self.logger.error(f"BV号 {bvid} 转换失败，未找到aid")
+                    return ""
             else:
-                self.logger.error(f"BV号转换失败: {data.get('message')}")
+                self.logger.error(f"BV号 {bvid} 转换失败: {data.get('message')}")
                 return ""
         except Exception as e:
-            self.logger.error(f"BV号转换异常: {e}")
+            self.logger.error(f"BV号 {bvid} 转换异常: {e}")
             return ""
     
     def generate_reply(self, comment: str) -> Optional[str]:
@@ -543,7 +722,20 @@ class BiliCommentBot:
             if not response:
                 return False
             
-            result = response.json()
+            # 解压响应内容
+            response_text = self.decompress_response(response)
+            
+            if not response_text:
+                self.logger.error(f"回复评论失败，响应内容为空")
+                return False
+            
+            # 尝试解析JSON
+            try:
+                result = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                self.logger.error(f"回复评论JSON解析失败: {e}")
+                self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
+                return False
             
             if result.get('code') == 0:
                 self.logger.info(f"成功回复评论 {comment_id}: {reply_content}")

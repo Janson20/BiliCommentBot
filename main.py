@@ -12,9 +12,287 @@ import logging
 import requests
 import toml
 import random
+import hashlib
+import urllib.parse
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
+
+
+class BilibiliCookieManager:
+    """
+    B站Cookie管理器
+    实现Cookie的自动刷新功能
+    """
+
+    def __init__(self, cookie_str: str = None, refresh_token: str = None):
+        """
+        初始化Cookie管理器
+
+        Args:
+            cookie_str: Cookie字符串，格式为"SESSDATA=xxx; bili_jct=xxx; ..."
+            refresh_token: 刷新令牌，可从登录响应中获取
+        """
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://www.bilibili.com/',
+            'Origin': 'https://www.bilibili.com',
+        })
+
+        if cookie_str:
+            self.set_cookie_from_str(cookie_str)
+
+        self.refresh_token = refresh_token
+        self.csrf_token = self._get_csrf_from_cookie()
+
+    def set_cookie_from_str(self, cookie_str: str):
+        """从字符串设置Cookie"""
+        cookie_dict = {}
+        for item in cookie_str.split(';'):
+            item = item.strip()
+            if not item:
+                continue
+            if '=' in item:
+                key, value = item.split('=', 1)
+                cookie_dict[key.strip()] = value.strip()
+            else:
+                cookie_dict[item] = ''
+        self.session.cookies.update(cookie_dict)
+
+    def _get_csrf_from_cookie(self) -> Optional[str]:
+        """从Cookie中获取CSRF Token (bili_jct)"""
+        return self.session.cookies.get('bili_jct', None)
+
+    def _generate_correspond_path(self) -> str:
+        """生成加密的correspondPath参数"""
+        timestamp = int(time.time())
+        md5 = hashlib.md5(f'{timestamp}'.encode()).hexdigest()
+        correspond_path = f'/apis/redirect/login?from=bilibili.com&timestamp={timestamp}&md5={md5}'
+        return correspond_path
+
+    def check_cookie_status(self) -> Dict:
+        """
+        检查Cookie状态
+
+        Returns:
+            Dict: 状态信息，包含是否需要刷新
+        """
+        url = 'https://passport.bilibili.com/x/passport-login/web/cookie/info'
+
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get('code') == 0:
+                return {
+                    'need_refresh': data.get('data', {}).get('refresh', False),
+                    'message': 'Cookie状态检查成功',
+                    'data': data.get('data', {})
+                }
+            else:
+                return {
+                    'need_refresh': False,
+                    'message': f'检查失败: {data.get("message", "未知错误")}',
+                    'code': data.get('code')
+                }
+
+        except Exception as e:
+            return {
+                'need_refresh': False,
+                'message': f'请求异常: {str(e)}',
+                'error': str(e)
+            }
+
+    def get_refresh_csrf(self) -> Optional[str]:
+        """
+        获取刷新所需的CSRF令牌
+
+        Returns:
+            str: refresh_csrf 令牌
+        """
+        correspond_path = self._generate_correspond_path()
+        encoded_path = urllib.parse.quote(correspond_path, safe='')
+
+        url = f'https://www.bilibili.com/correspond/1/{encoded_path}'
+
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+
+            # 从返回的HTML中提取refresh_csrf
+            # 通常位于JavaScript变量中
+            html_content = response.text
+
+            # 尝试从HTML中提取refresh_csrf
+            # 注意：实际实现可能需要根据B站的返回格式调整
+            if 'refresh_csrf' in html_content:
+                # 这里需要根据实际页面结构解析
+                # 以下是示例解析逻辑，可能需要调整
+                import re
+                pattern = r'"refresh_csrf"\s*:\s*"([^"]+)"'
+                match = re.search(pattern, html_content)
+                if match:
+                    return match.group(1)
+
+            return None
+
+        except Exception as e:
+            return None
+
+    def refresh_cookie(self, refresh_token: str = None) -> Tuple[bool, Dict]:
+        """
+        刷新Cookie
+
+        Args:
+            refresh_token: 刷新令牌，如果为None则使用初始化时设置的
+
+        Returns:
+            Tuple[bool, Dict]: (是否成功, 响应信息)
+        """
+        if not refresh_token and not self.refresh_token:
+            return False, {'message': 'refresh_token不存在'}
+
+        token = refresh_token or self.refresh_token
+
+        # 获取refresh_csrf
+        refresh_csrf = self.get_refresh_csrf()
+        if not refresh_csrf:
+            return False, {'message': '获取refresh_csrf失败'}
+
+        # 获取CSRF token
+        csrf_token = self._get_csrf_from_cookie()
+        if not csrf_token:
+            return False, {'message': '从Cookie中获取CSRF token失败'}
+
+        # 刷新Cookie
+        url = 'https://passport.bilibili.com/x/passport-login/web/cookie/refresh'
+
+        params = {
+            'csrf': csrf_token,
+            'refresh_csrf': refresh_csrf,
+            'refresh_token': token,
+            'source': 'main_web'
+        }
+
+        try:
+            response = self.session.post(url, data=params)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get('code') == 0:
+                response_data = data.get('data', {})
+
+                # 更新refresh_token
+                new_refresh_token = response_data.get('refresh_token')
+                if new_refresh_token:
+                    self.refresh_token = new_refresh_token
+
+                # 确认刷新，使旧的refresh_token失效
+                if self.confirm_refresh(new_refresh_token):
+                    return True, {
+                        'message': 'Cookie刷新成功',
+                        'data': response_data,
+                        'new_refresh_token': new_refresh_token,
+                        'cookies': dict(self.session.cookies)
+                    }
+                else:
+                    return False, {'message': 'Cookie刷新确认失败'}
+            else:
+                return False, {
+                    'message': f'刷新失败: {data.get("message", "未知错误")}',
+                    'code': data.get('code')
+                }
+
+        except Exception as e:
+            return False, {
+                'message': f'刷新请求异常: {str(e)}',
+                'error': str(e)
+            }
+
+    def confirm_refresh(self, new_refresh_token: str) -> bool:
+        """
+        确认刷新，使旧的refresh_token失效
+
+        Args:
+            new_refresh_token: 新的刷新令牌
+
+        Returns:
+            bool: 是否成功
+        """
+        csrf_token = self._get_csrf_from_cookie()
+        if not csrf_token:
+            return False
+
+        url = 'https://passport.bilibili.com/x/passport-login/web/confirm/refresh'
+
+        params = {
+            'csrf': csrf_token,
+            'refresh_token': new_refresh_token
+        }
+
+        try:
+            response = self.session.post(url, data=params)
+            response.raise_for_status()
+            data = response.json()
+
+            return data.get('code') == 0
+
+        except Exception as e:
+            return False
+
+    def get_cookie_str(self) -> str:
+        """获取当前Cookie字符串"""
+        return '; '.join([f'{k}={v}' for k, v in self.session.cookies.items()])
+
+    def save_to_file(self, filename: str = 'bilibili_cookie.json'):
+        """保存Cookie和refresh_token到文件"""
+        data = {
+            'cookie': dict(self.session.cookies),
+            'refresh_token': self.refresh_token,
+            'timestamp': time.time()
+        }
+
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def load_from_file(self, filename: str = 'bilibili_cookie.json') -> bool:
+        """从文件加载Cookie和refresh_token"""
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            if 'cookie' in data:
+                for k, v in data['cookie'].items():
+                    self.session.cookies.set(k, v)
+
+            if 'refresh_token' in data:
+                self.refresh_token = data['refresh_token']
+
+            self.csrf_token = self._get_csrf_from_cookie()
+            return True
+
+        except Exception as e:
+            return False
+
+    def auto_refresh_if_needed(self) -> Tuple[bool, Dict]:
+        """
+        自动检查并刷新Cookie（如果需要）
+
+        Returns:
+            Tuple[bool, Dict]: (是否需要刷新, 刷新结果)
+        """
+        # 检查Cookie状态
+        status = self.check_cookie_status()
+
+        if status.get('need_refresh'):
+            return True, self.refresh_cookie()
+        else:
+            if status.get('code') == -101:  # 未登录
+                return False, {'message': 'Cookie已过期，需要重新登录'}
+            else:
+                return False, {'message': 'Cookie状态正常，无需刷新'}
 
 
 @dataclass
@@ -36,7 +314,7 @@ class BiliCommentBot:
         self.config = self.load_config(config_path)
         self.setup_logging()
         self.session = requests.Session()
-        
+
         # 初始化请求头池
         self.user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -45,44 +323,65 @@ class BiliCommentBot:
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15'
         ]
-        
+
         self.referers = [
             'https://www.bilibili.com/',
             'https://search.bilibili.com/',
             'https://t.bilibili.com/',
             'https://space.bilibili.com/'
         ]
-        
+
         self.update_headers()
-        
+
+        # 初始化Cookie管理器
+        self.cookie_manager = None
+        self.last_cookie_refresh_time = 0
+        self.cookie_refresh_interval = self.config['bilibili'].get('cookie_refresh_interval', 30) * 60  # 转换为秒
+        self.auto_refresh_cookie = self.config['bilibili'].get('auto_refresh_cookie', True)
+
         if self.config['bilibili']['cookie']:
-            self.session.headers.update({
-                'Cookie': self.config['bilibili']['cookie']
-            })
+            # 尝试从文件加载Cookie
+            self.cookie_manager = BilibiliCookieManager()
+            if self.cookie_manager.load_from_file('bilibili_cookie.json'):
+                self.logger.info("从文件加载Cookie成功")
+                # 合并session
+                self.session.cookies.update(self.cookie_manager.session.cookies)
+            else:
+                # 从配置文件加载Cookie
+                cookie_str = self.config['bilibili']['cookie']
+                refresh_token = self.config['bilibili'].get('refresh_token', '')
+                self.cookie_manager = BilibiliCookieManager(cookie_str, refresh_token)
+                self.session.cookies.update(self.cookie_manager.session.cookies)
+
             # 提取CSRF token
-            self.csrf_token = self.extract_csrf_token(self.config['bilibili']['cookie'])
+            self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
+
+            # 如果启用了自动刷新，启动时检查一次
+            if self.auto_refresh_cookie and self.cookie_manager.refresh_token:
+                self.logger.info("启动时检查Cookie状态...")
+                self.refresh_cookie_if_needed()
         else:
             self.csrf_token = None
-        
+
         self.processed_comments = set()
         self.history_file = "history.json"
         self.load_history()
-        
+
         # 请求频率控制
         self.last_request_time = 0
         rate_limit_config = self.config.get('rate_limit', {})
         self.min_request_interval = rate_limit_config.get('min_request_interval', 2.0)
         self.max_retries = rate_limit_config.get('max_retries', 3)
         self.retry_delay = rate_limit_config.get('retry_delay', 5)
-        
+
         # 缓存配置
         self.cache = {}
         self.cache_expire_time = 300  # 5分钟缓存过期时间
-        
+
         # 动态间隔控制
         self.consecutive_failures = 0
         self.adaptive_interval = self.min_request_interval
-        
+
         # 视频列表缓存配置（12小时）
         video_cache_config = self.config.get('video_cache', {})
         self.cached_videos = []
@@ -90,7 +389,7 @@ class BiliCommentBot:
         self.video_cache_file = video_cache_config.get('cache_file', 'video_cache.json')
         self.video_cache_expire_time = video_cache_config.get('expire_time', 43200)  # 默认12小时
         self.load_video_cache()
-        
+
         self.logger.info("B站评论自动回复机器人启动")
     
     def extract_csrf_token(self, cookie: str) -> Optional[str]:
@@ -655,27 +954,26 @@ class BiliCommentBot:
     def generate_reply(self, comment: str) -> Optional[str]:
         """使用DeepSeek API生成回复"""
         api_config = self.config['deepseek']
-        
+
         headers = {
             'Authorization': f"Bearer {api_config['api_key']}",
             'Content-Type': 'application/json'
         }
-        
-        prompt = f"""你是一个友善的B站游戏区Minecraft UP主，请对以下评论做出自然、友好的回复。回复要简洁明了，控制在100字以内。
 
-评论内容：{comment}
+        # 从配置文件读取系统提示词
+        system_prompt = api_config.get('system_prompt',
+            '你是一个友善的B站游戏区Minecraft UP主，请对评论做出自然、友好的回复。回复要简洁明了，控制在100字以内。')
 
-请直接给出回复内容，不要包含其他解释。"""
-        
         data = {
             'model': api_config['model'],
             'messages': [
-                {'role': 'user', 'content': prompt}
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': comment}
             ],
             'max_tokens': api_config['max_tokens'],
             'temperature': api_config['temperature']
         }
-        
+
         try:
             response = requests.post(
                 f"{api_config['base_url']}/chat/completions",
@@ -683,7 +981,7 @@ class BiliCommentBot:
                 json=data,
                 timeout=30
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
                 reply = result['choices'][0]['message']['content'].strip()
@@ -696,18 +994,72 @@ class BiliCommentBot:
             self.logger.error(f"DeepSeek API调用异常: {e}")
             return None
     
+    def like_comment(self, bvid: str, comment_id: str) -> bool:
+        """给评论点赞"""
+        # 确保使用最新的CSRF token
+        if self.cookie_manager:
+            self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
+
+        if not self.csrf_token:
+            self.logger.error("未找到CSRF token，无法点赞评论")
+            return False
+
+        url = "https://api.bilibili.com/x/v2/reply/action"
+
+        data = {
+            'type': 1,
+            'oid': self.bvid_to_aid(bvid),
+            'rpid': comment_id,
+            'action': 1,  # 1表示点赞，2表示取消点赞
+            'csrf': self.csrf_token
+        }
+
+        try:
+            response = self.make_request_with_retry('POST', url, data=data)
+            if not response:
+                return False
+
+            # 解压响应内容
+            response_text = self.decompress_response(response)
+
+            if not response_text:
+                self.logger.error(f"点赞评论失败，响应内容为空")
+                return False
+
+            # 尝试解析JSON
+            try:
+                result = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                self.logger.error(f"点赞评论JSON解析失败: {e}")
+                self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
+                return False
+
+            if result.get('code') == 0:
+                self.logger.info(f"成功点赞评论 {comment_id}")
+                return True
+            else:
+                self.logger.error(f"点赞评论失败: {result.get('message')}")
+                return False
+        except Exception as e:
+            self.logger.error(f"点赞评论异常: {e}")
+            return False
+    
     def reply_comment(self, bvid: str, comment_id: str, content: str) -> bool:
         """回复评论"""
+        # 确保使用最新的CSRF token
+        if self.cookie_manager:
+            self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
+
         if not self.csrf_token:
             self.logger.error("未找到CSRF token，无法回复评论")
             return False
-        
+
         url = "https://api.bilibili.com/x/v2/reply/add"
-        
+
         # 添加回复前缀
         prefix = self.config['reply']['prefix']
         reply_content = f"{prefix}{content}"
-        
+
         data = {
             'type': 1,
             'oid': self.bvid_to_aid(bvid),
@@ -716,19 +1068,19 @@ class BiliCommentBot:
             'message': reply_content,
             'csrf': self.csrf_token
         }
-        
+
         try:
             response = self.make_request_with_retry('POST', url, data=data)
             if not response:
                 return False
-            
+
             # 解压响应内容
             response_text = self.decompress_response(response)
-            
+
             if not response_text:
                 self.logger.error(f"回复评论失败，响应内容为空")
                 return False
-            
+
             # 尝试解析JSON
             try:
                 result = json.loads(response_text)
@@ -736,7 +1088,7 @@ class BiliCommentBot:
                 self.logger.error(f"回复评论JSON解析失败: {e}")
                 self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
                 return False
-            
+
             if result.get('code') == 0:
                 self.logger.info(f"成功回复评论 {comment_id}: {reply_content}")
                 return True
@@ -747,50 +1099,121 @@ class BiliCommentBot:
             self.logger.error(f"回复评论异常: {e}")
             return False
     
+    def refresh_cookie_if_needed(self) -> bool:
+        """
+        检查并刷新Cookie（如果需要）
+
+        Returns:
+            bool: 是否执行了刷新操作
+        """
+        if not self.cookie_manager or not self.cookie_manager.refresh_token:
+            return False
+
+        # 检查是否到了刷新时间
+        current_time = time.time()
+        if current_time - self.last_cookie_refresh_time < self.cookie_refresh_interval:
+            return False
+
+        self.logger.info("检查Cookie状态...")
+        need_refresh, result = self.cookie_manager.auto_refresh_if_needed()
+
+        if need_refresh:
+            success = result[0]
+            if success:
+                result_data = result[1]
+                new_refresh_token = result_data.get('new_refresh_token')
+                new_cookies = result_data.get('cookies')
+
+                # 更新session的cookie
+                self.session.cookies.clear()
+                self.session.cookies.update(new_cookies)
+
+                # 更新CSRF token
+                self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
+
+                # 更新配置文件
+                if new_refresh_token:
+                    self.config['bilibili']['refresh_token'] = new_refresh_token
+                    self.update_config_file()
+
+                # 保存到文件
+                self.cookie_manager.save_to_file('bilibili_cookie.json')
+
+                self.last_cookie_refresh_time = current_time
+                self.logger.info(f"Cookie刷新成功: {result_data.get('message')}")
+                return True
+            else:
+                error_msg = result[1].get('message', '未知错误')
+                self.logger.error(f"Cookie刷新失败: {error_msg}")
+                if 'Cookie已过期' in error_msg:
+                    self.logger.error("Cookie已过期，需要重新登录获取refresh_token")
+        else:
+            self.logger.debug(f"Cookie状态正常: {result.get('message')}")
+            self.last_cookie_refresh_time = current_time
+
+        return False
+
+    def update_config_file(self):
+        """更新配置文件"""
+        try:
+            with open('config.toml', 'w', encoding='utf-8') as f:
+                toml.dump(self.config, f)
+            self.logger.info("配置文件已更新（refresh_token）")
+        except Exception as e:
+            self.logger.error(f"更新配置文件失败: {e}")
+
     def process_comments(self):
         """处理评论"""
+        # 检查并刷新Cookie（如果需要）
+        if self.auto_refresh_cookie:
+            self.refresh_cookie_if_needed()
+
         if not self.config['reply']['enabled']:
             self.logger.info("自动回复已禁用")
             return
-        
+
         videos = self.get_video_list()
         if not videos:
             return
-        
+
         max_process = self.config['reply']['max_process']
         processed_count = 0
-        
+
         for video in videos:
             if processed_count >= max_process:
                 break
-            
+
             bvid = video['bvid']
             comments = self.get_video_comments(bvid)
-            
+
             for comment in comments:
                 if processed_count >= max_process:
                     break
-                
+
                 # 检查是否已处理过
                 if comment.comment_id in self.processed_comments:
                     continue
-                
+
                 # 检查是否只处理新评论
                 if self.config['reply']['only_new']:
                     # 这里可以添加更复杂的新评论判断逻辑
                     # 比如检查评论时间等
                     pass
-                
+
                 # 生成回复
                 reply_content = self.generate_reply(comment.content)
                 if reply_content:
+                    # 如果启用了点赞功能，先点赞评论
+                    if self.config['reply'].get('like_enabled', False):
+                        self.like_comment(bvid, comment.comment_id)
+
                     # 发送回复
                     if self.reply_comment(bvid, comment.comment_id, reply_content):
                         self.processed_comments.add(comment.comment_id)
                         # 保存到历史记录
                         self.save_history(comment, reply_content)
                         processed_count += 1
-                        
+
                         # 延迟避免频繁操作
                         delay = self.config['reply']['reply_delay']
                         if delay > 0:
@@ -799,20 +1222,30 @@ class BiliCommentBot:
     def run(self):
         """运行机器人"""
         self.logger.info("开始运行B站评论自动回复机器人")
-        
+
         try:
             while True:
                 self.process_comments()
-                
+
                 # 等待下次检查
                 interval = self.config['bilibili']['check_interval']
                 self.logger.info(f"等待 {interval} 秒后进行下次检查")
                 time.sleep(interval)
-                
+
         except KeyboardInterrupt:
             self.logger.info("收到停止信号，机器人停止运行")
+            # 退出前保存Cookie状态
+            if self.cookie_manager:
+                self.cookie_manager.save_to_file('bilibili_cookie.json')
+                self.logger.info("Cookie状态已保存")
         except Exception as e:
             self.logger.error(f"运行异常: {e}")
+            # 异常时也尝试保存Cookie状态
+            if self.cookie_manager:
+                try:
+                    self.cookie_manager.save_to_file('bilibili_cookie.json')
+                except:
+                    pass
             raise
 
 

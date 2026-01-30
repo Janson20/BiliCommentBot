@@ -4,10 +4,16 @@
 [bilibili]
 # B站Cookie（从浏览器获取）
 cookie = ""
+# 刷新令牌（用于自动刷新Cookie）
+refresh_token = ""
 # 你的B站用户ID
 uid = ""
 # 检查评论的间隔时间（秒）
 check_interval = 60
+# 是否启用Cookie自动刷新
+auto_refresh_cookie = true
+# Cookie刷新检查间隔（分钟）
+cookie_refresh_interval = 30
 
 # 请求频率控制配置
 [rate_limit]
@@ -44,6 +50,8 @@ model = "deepseek-chat"
 max_tokens = 200
 # 温度参数（0-1，控制回复的随机性）
 temperature = 0.7
+# 系统提示词（定义AI的角色和行为）
+system_prompt = "你是一个友善的B站游戏区Minecraft UP主，请对评论做出自然、友好的回复。回复要简洁明了，控制在100字以内。"
 
 # 回复配置
 [reply]

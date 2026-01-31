@@ -415,3 +415,7 @@ reply_delay = 5
    - 智能退避避免频率限制
    - 降级到使用缓存
    - 记录详细日志
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Janson20/BiliCommentBot&type=date&legend=top-left)](https://www.star-history.com/#Janson20/BiliCommentBot&type=date&legend=top-left)

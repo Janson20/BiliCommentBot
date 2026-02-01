@@ -126,15 +126,32 @@ class BilibiliCookieManager:
             html_content = response.text
 
             # 尝试从HTML中提取refresh_csrf
-            # 注意：实际实现可能需要根据B站的返回格式调整
-            if 'refresh_csrf' in html_content:
-                # 这里需要根据实际页面结构解析
-                # 以下是示例解析逻辑，可能需要调整
-                import re
-                pattern = r'"refresh_csrf"\s*:\s*"([^"]+)"'
-                match = re.search(pattern, html_content)
+            # 尝试多种模式匹配
+            import re
+
+            # 模式1: 匹配 "refresh_csrf":"value"
+            patterns = [
+                r'"refresh_csrf"\s*:\s*"([^"]+)"',
+                r'"refresh_csrf"\s*:\s*"((?:[^"\\]|\\.)*)"',  # 处理转义字符
+                r"refresh_csrf\s*=\s*'([^']+)'",
+                r"refresh_csrf\s*=\s*\"([^\"]+)\"",
+                r'"refresh_csrf"\s*:\s*([0-9a-f]+)',  # 匹配数字/字母组合（如MD5）
+                r"refresh_csrf['\"]?\s*[:=]\s*['\"]?([0-9a-zA-Z_-]+)['\"]?"  # 更宽松的匹配
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, html_content, re.IGNORECASE)
                 if match:
-                    return match.group(1)
+                    csrf_value = match.group(1)
+                    # 验证值不为空且不是纯数字
+                    if csrf_value and csrf_value.strip():
+                        return csrf_value.strip()
+
+            # 如果都失败，打印部分HTML用于调试
+            # 找到包含refresh_csrf的行
+            lines_with_keyword = [line for line in html_content.split('\n') if 'refresh_csrf' in line.lower()]
+            if lines_with_keyword:
+                self.logger.debug(f"找到包含refresh_csrf的行: {lines_with_keyword[:3]}")
 
             return None
 
@@ -191,6 +208,22 @@ class BilibiliCookieManager:
 
                 # 确认刷新，使旧的refresh_token失效
                 if self.confirm_refresh(new_refresh_token):
+                    # 刷新成功后，需要从响应中获取新的 Cookie
+                    # response.cookies 包含服务器返回的新 Cookie（如 set-cookie 头部）
+                    if hasattr(response, 'cookies') and response.cookies:
+                        # 将响应中的新 Cookie 更新到 session
+                        for cookie_name, cookie_value in response.cookies.items():
+                            self.session.cookies.set(cookie_name, cookie_value)
+                            self.logger.debug(f"更新Cookie: {cookie_name}")
+
+                    # 验证关键 Cookie 是否存在
+                    sessdata = self.session.cookies.get('SESSDATA')
+                    bili_jct = self.session.cookies.get('bili_jct')
+                    if not sessdata or not bili_jct:
+                        self.logger.warning(f"刷新后关键 Cookie 缺失: SESSDATA={bool(sessdata)}, bili_jct={bool(bili_jct)}")
+                    else:
+                        self.logger.debug("刷新后关键 Cookie 存在")
+
                     return True, {
                         'message': 'Cookie刷新成功',
                         'data': response_data,
@@ -275,6 +308,44 @@ class BilibiliCookieManager:
 
         except Exception as e:
             return False
+
+    def verify_cookie(self) -> Tuple[bool, Dict]:
+        """
+        验证当前Cookie是否有效（是否处于登录状态）
+
+        Returns:
+            Tuple[bool, Dict]: (是否有效, 状态信息)
+        """
+        # 检查关键Cookie是否存在
+        sessdata = self.session.cookies.get('SESSDATA')
+        bili_jct = self.session.cookies.get('bili_jct')
+        if not sessdata or not bili_jct:
+            return False, {'message': '关键Cookie缺失 (SESSDATA或bili_jct)'}
+
+        # 调用B站API验证登录状态
+        url = 'https://api.bilibili.com/x/space/myinfo'
+
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get('code') == 0:
+                user_info = data.get('data', {})
+                return True, {
+                    'message': 'Cookie有效，已登录',
+                    'user_info': {
+                        'mid': user_info.get('mid'),
+                        'name': user_info.get('name')
+                    }
+                }
+            else:
+                return False, {
+                    'message': f'Cookie验证失败: {data.get("message", "未知错误")}',
+                    'code': data.get('code')
+                }
+        except Exception as e:
+            return False, {'message': f'验证请求异常: {str(e)}', 'error': str(e)}
 
     def auto_refresh_if_needed(self) -> Tuple[bool, Dict]:
         """
@@ -1128,8 +1199,20 @@ class BiliCommentBot:
                 self.session.cookies.clear()
                 self.session.cookies.update(new_cookies)
 
+                # 同步cookie_manager的cookie到main session
+                self.session.cookies.update(self.cookie_manager.session.cookies)
+
                 # 更新CSRF token
                 self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
+
+                # 验证刷新后的Cookie是否有效
+                self.logger.info("验证刷新后的Cookie...")
+                is_valid, verify_result = self.cookie_manager.verify_cookie()
+                if is_valid:
+                    user_info = verify_result.get('user_info', {})
+                    self.logger.info(f"刷新后的Cookie有效，用户: {user_info.get('name', 'N/A')}")
+                else:
+                    self.logger.warning(f"刷新后的Cookie验证失败: {verify_result.get('message')}")
 
                 # 更新配置文件
                 if new_refresh_token:

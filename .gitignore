@@ -5,3 +5,5 @@
 /.venv
 history.json
 video_history.json
+/bili_scraper.py
+/prompt.txt

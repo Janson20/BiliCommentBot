@@ -1022,8 +1022,16 @@ class BiliCommentBot:
             self.logger.error(f"BV号 {bvid} 转换异常: {e}")
             return ""
     
-    def generate_reply(self, comment: str) -> Optional[str]:
-        """使用DeepSeek API生成回复"""
+    def generate_reply(self, comment: str, context: List[Comment] = None) -> Optional[str]:
+        """使用DeepSeek API生成回复
+
+        Args:
+            comment: 待回复的评论内容
+            context: 前面N条评论作为上下文（可选）
+
+        Returns:
+            生成的回复内容
+        """
         api_config = self.config['deepseek']
 
         headers = {
@@ -1035,12 +1043,25 @@ class BiliCommentBot:
         system_prompt = api_config.get('system_prompt',
             '你是一个友善的B站游戏区Minecraft UP主，请对评论做出自然、友好的回复。回复要简洁明了，控制在100字以内。')
 
+        # 构建消息列表
+        messages = [
+            {'role': 'system', 'content': system_prompt}
+        ]
+
+        # 如果有上下文评论，先添加到消息列表
+        if context:
+            context_text = "以下是前面的评论，可以帮助你理解上下文：\n\n"
+            for i, ctx_comment in enumerate(context, 1):
+                context_text += f"{i}. {ctx_comment.user}: {ctx_comment.content}\n"
+            messages.append({'role': 'user', 'content': context_text})
+            self.logger.debug(f"使用 {len(context)} 条评论作为上下文")
+
+        # 添加当前需要回复的评论
+        messages.append({'role': 'user', 'content': comment})
+
         data = {
             'model': api_config['model'],
-            'messages': [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': comment}
-            ],
+            'messages': messages,
             'max_tokens': api_config['max_tokens'],
             'temperature': api_config['temperature']
         }
@@ -1262,6 +1283,9 @@ class BiliCommentBot:
         max_process = self.config['reply']['max_process']
         processed_count = 0
 
+        # 获取上下文评论数量配置
+        context_count = self.config['reply'].get('context_comments_count', 0)
+
         for video in videos:
             if processed_count >= max_process:
                 break
@@ -1269,7 +1293,7 @@ class BiliCommentBot:
             bvid = video['bvid']
             comments = self.get_video_comments(bvid)
 
-            for comment in comments:
+            for idx, comment in enumerate(comments):
                 if processed_count >= max_process:
                     break
 
@@ -1283,8 +1307,16 @@ class BiliCommentBot:
                     # 比如检查评论时间等
                     pass
 
-                # 生成回复
-                reply_content = self.generate_reply(comment.content)
+                # 获取上下文评论（当前评论之前的评论）
+                context_comments = []
+                if context_count > 0 and idx > 0:
+                    # 取前面的N条评论作为上下文
+                    start_idx = max(0, idx - context_count)
+                    context_comments = comments[start_idx:idx]
+                    self.logger.debug(f"评论 {comment.comment_id} 使用前 {len(context_comments)} 条评论作为上下文")
+
+                # 生成回复（带上上下文）
+                reply_content = self.generate_reply(comment.content, context_comments)
                 if reply_content:
                     # 如果启用了点赞功能，先点赞评论
                     if self.config['reply'].get('like_enabled', False):

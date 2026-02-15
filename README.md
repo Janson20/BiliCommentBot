@@ -23,11 +23,42 @@
 pip install -r requirements.txt
 ```
 
+## 快速开始
+
+### 运行机器人
+
+```bash
+python main.py
+```
+
+按 `Ctrl+C` 可以安全停止机器人运行。
+
+### GUI配置工具
+
+项目提供了图形界面配置工具，可以更方便地编辑 `config.toml` 配置文件：
+
+```bash
+python config_gui.py
+```
+
+**功能特点：**
+- 6个标签页分类管理：B站配置、频率限制、缓存配置、DeepSeek配置、回复配置、日志配置
+- 自动读取现有配置内容
+- 一键保存配置文件
+- 支持重新加载配置
+
+**运行要求：**
+- Python 3.11+（使用标准库 `tomllib`）
+- 需要安装 `tomli_w` 依赖（已在 requirements.txt 中）
+
 ## 配置说明
 
-1. 复制并编辑 `config.toml` 文件：
+### 手动配置
 
-### B站配置
+1. 复制 `config.example.toml` 为 `config.toml`
+2. 根据以下说明编辑配置文件
+
+#### B站配置
 - `cookie`: 从浏览器获取的B站Cookie
 - `refresh_token`: Cookie刷新令牌（用于自动刷新Cookie）
 - `uid`: 你的B站用户ID
@@ -35,7 +66,7 @@ pip install -r requirements.txt
 - `cookie_refresh_interval`: Cookie刷新间隔（分钟，默认30）
 - `auto_refresh_cookie`: 是否自动刷新Cookie（默认true）
 
-### DeepSeek API配置
+#### DeepSeek API配置
 - `api_key`: DeepSeek API密钥
 - `base_url`: API基础URL
 - `model`: 使用的模型（默认：deepseek-chat）
@@ -43,7 +74,7 @@ pip install -r requirements.txt
 - `temperature`: 温度参数（0-1）
 - `system_prompt`: 系统提示词，定义AI回复的风格和角色（默认为友善的Minecraft UP主）
 
-### 回复配置
+#### 回复配置
 - `enabled`: 是否启用自动回复
 - `prefix`: 回复前缀
 - `only_new`: 是否只回复未处理的评论
@@ -51,7 +82,7 @@ pip install -r requirements.txt
 - `reply_delay`: 回复延迟（秒）
 - `like_enabled`: 是否在回复前先点赞评论（默认false）
 
-### 请求频率控制配置
+#### 请求频率控制配置
 - `min_request_interval`: 最小请求间隔（秒，默认2.0）
 - `max_retries`: 最大重试次数（默认3）
 - `retry_delay`: 重试基础延迟（秒，默认5）
@@ -63,68 +94,13 @@ pip install -r requirements.txt
 - 响应缓存：GET请求会缓存响应，减少重复请求（5分钟过期）
 - 请求头随机化：每次请求使用不同的User-Agent和Referer，模拟真实用户行为
 
-### 视频列表缓存配置
+#### 视频列表缓存配置
 - `expire_time`: 视频列表缓存过期时间（秒，默认43200即12小时）
 - `cache_file`: 视频缓存文件路径（默认video_cache.json）
 
 **重要**：视频列表每12小时获取一次，减少API请求，避免频率限制
 
-## 获取B站Cookie
-
-1. 登录B站网页版
-2. 按F12打开开发者工具
-3. 切换到Network标签
-4. 刷新页面
-5. 找到任意请求，查看Request Headers中的Cookie
-6. 复制完整的Cookie字符串到配置文件
-7. **重要**: 确保Cookie中包含`bili_jct`字段，这是CSRF校验必需的
-
-### Cookie自动刷新功能
-
-机器人支持Cookie自动刷新功能，可避免因Cookie过期而需要重新获取的问题：
-
-**启用自动刷新**：
-- 在配置文件中设置 `auto_refresh_cookie = true`
-- 提供有效的 `refresh_token` 参数
-- 设置 `cookie_refresh_interval` 控制刷新间隔（默认30分钟）
-
-**获取refresh_token**：
-refresh_token 通常在登录B站时的响应中获取，可以通过以下方式：
-1. 使用B站登录API获取
-2. 使用浏览器抓包工具捕获登录响应
-3. 在某些情况下，B站可能不提供此功能，此时可禁用自动刷新
-
-**Cookie持久化**：
-- Cookie和refresh_token会自动保存到 `bilibili_cookie.json` 文件
-- 机器人退出前会自动保存Cookie状态
-- 启动时会优先从文件加载Cookie
-- Cookie刷新成功后会自动更新文件
-
-Cookie示例格式：
-```
-SESSDATA=xxx; bili_jct=xxx; DedeUserID=xxx; sid=xxx
-```
-
-## 获取B站用户ID
-
-1. 访问你的B站主页
-2. 查看URL中的数字部分（如：space.bilibili.com/123456789）
-3. 这个数字就是你的用户ID
-
-## 获取DeepSeek API密钥
-
-1. 访问 [DeepSeek官网](https://platform.deepseek.com/)
-2. 注册并登录
-3. 在API管理页面创建新的API密钥
-4. 将密钥填入配置文件
-
-## 运行机器人
-
-```bash
-python main.py
-```
-
-## 完整配置示例
+### 完整配置示例
 
 参考 `config.example.toml` 文件，以下是一个典型的配置示例：
 
@@ -168,9 +144,35 @@ file = "logs/bot.log"
 console = true
 ```
 
-## 日志文件
+## 获取凭证
 
-日志文件位于 `logs/bot.log`，包含详细的运行信息和错误记录。
+### 获取B站Cookie
+
+1. 登录B站网页版
+2. 按F12打开开发者工具
+3. 切换到Network标签
+4. 刷新页面
+5. 找到任意请求，查看Request Headers中的Cookie
+6. 复制完整的Cookie字符串到配置文件
+7. **重要**: 确保Cookie中包含`bili_jct`字段，这是CSRF校验必需的
+
+Cookie示例格式：
+```
+SESSDATA=xxx; bili_jct=xxx; DedeUserID=xxx; sid=xxx
+```
+
+### 获取B站用户ID
+
+1. 访问你的B站主页
+2. 查看URL中的数字部分（如：space.bilibili.com/123456789）
+3. 这个数字就是你的用户ID
+
+### 获取DeepSeek API密钥
+
+1. 访问 [DeepSeek官网](https://platform.deepseek.com/)
+2. 注册并登录
+3. 在API管理页面创建新的API密钥
+4. 将密钥填入配置文件
 
 ## 注意事项
 
@@ -185,11 +187,86 @@ console = true
 9. 机器人会自动保存Cookie状态到 `bilibili_cookie.json` 文件，请勿手动删除此文件
 10. 如果Cookie过期且无法自动刷新，需要重新登录获取新的Cookie和refresh_token
 
-## 停止机器人
+## 功能详解
 
-按 `Ctrl+C` 可以安全停止机器人运行。
+### Cookie自动刷新
 
-## 历史记录
+机器人支持Cookie自动刷新功能，可避免因Cookie过期而需要重新获取的问题：
+
+**启用自动刷新**：
+- 在配置文件中设置 `auto_refresh_cookie = true`
+- 提供有效的 `refresh_token` 参数
+- 设置 `cookie_refresh_interval` 控制刷新间隔（默认30分钟）
+
+**获取refresh_token**：
+refresh_token 通常在登录B站时的响应中获取，可以通过以下方式：
+1. 使用B站登录API获取
+2. 使用浏览器抓包工具捕获登录响应
+3. 在某些情况下，B站可能不提供此功能，此时可禁用自动刷新
+
+**Cookie持久化**：
+- Cookie和refresh_token会自动保存到 `bilibili_cookie.json` 文件
+- 机器人退出前会自动保存Cookie状态
+- 启动时会优先从文件加载Cookie
+- Cookie刷新成功后会自动更新文件
+
+### Cookie状态监控
+
+机器人会定期检查Cookie状态：
+
+**检查时机**：
+- 启动时检查一次
+- 每隔 `cookie_refresh_interval` 分钟检查一次
+- 在执行重要操作前检查
+
+**状态信息**：
+- Cookie是否需要刷新
+- 刷新操作的执行结果
+- 错误信息和警告
+
+**自动保存**：
+- Cookie状态会保存到 `bilibili_cookie.json`
+- 包含cookie、refresh_token和时间戳
+- 程序退出前自动保存
+
+### 视频列表缓存
+
+为了减少API请求频率，机器人会将视频列表缓存到 `video_cache.json` 文件中，默认缓存时间为12小时。
+
+**缓存机制**：
+- **自动获取**：首次运行时自动获取视频列表并缓存
+- **自动更新**：每12小时自动更新视频列表
+- **容错处理**：如果获取失败，会使用过期缓存
+- **持久化**：缓存保存到文件，重启后仍然有效
+
+**缓存文件格式**：
+```json
+{
+  "videos": [
+    {
+      "bvid": "BV1xx411c7mD",
+      "title": "视频标题",
+      "description": "视频描述",
+      "author": "UP主",
+      "play": 1000,
+      "comment": 100
+    }
+  ],
+  "fetch_time": 1642694400,
+  "fetch_timestamp": "2022-01-20 12:00:00"
+}
+```
+
+**配置缓存时间**：
+```toml
+[video_cache]
+expire_time = 43200  # 12小时（单位：秒）
+cache_file = "video_cache.json"
+```
+
+**清除缓存**：删除 `video_cache.json` 文件后重启程序即可。
+
+### 历史记录
 
 机器人会自动将回复过的评论保存到 `history.json` 文件中，包含以下信息：
 
@@ -214,48 +291,9 @@ console = true
 ]
 ```
 
-## 免责声明
+### 日志文件
 
-本工具仅供学习和研究使用，请遵守B站的相关规定和API使用条款。使用本工具所产生的任何后果由用户自行承担。
-
-## 视频列表缓存
-
-为了减少API请求频率，机器人会将视频列表缓存到 `video_cache.json` 文件中，默认缓存时间为12小时。
-
-### 缓存机制
-- **自动获取**：首次运行时自动获取视频列表并缓存
-- **自动更新**：每12小时自动更新视频列表
-- **容错处理**：如果获取失败，会使用过期缓存
-- **持久化**：缓存保存到文件，重启后仍然有效
-
-### 缓存文件格式
-```json
-{
-  "videos": [
-    {
-      "bvid": "BV1xx411c7mD",
-      "title": "视频标题",
-      "description": "视频描述",
-      "author": "UP主",
-      "play": 1000,
-      "comment": 100
-    }
-  ],
-  "fetch_time": 1642694400,
-  "fetch_timestamp": "2022-01-20 12:00:00"
-}
-```
-
-### 配置缓存时间
-如需修改缓存时间，编辑 `config.toml` 文件：
-```toml
-[video_cache]
-expire_time = 43200  # 12小时（单位：秒）
-cache_file = "video_cache.json"
-```
-
-### 清除缓存
-如需立即刷新视频列表，删除 `video_cache.json` 文件后重启程序即可。
+日志文件位于 `logs/bot.log`，包含详细的运行信息和错误记录。
 
 ## 高级功能
 
@@ -291,25 +329,6 @@ reply_delay = 5
 - 点赞功能会增加API请求次数
 - 点赞失败不会影响回复功能
 - 每个评论只会点赞一次
-
-### Cookie状态监控
-
-机器人会定期检查Cookie状态：
-
-**检查时机**：
-- 启动时检查一次
-- 每隔 `cookie_refresh_interval` 分钟检查一次
-- 在执行重要操作前检查
-
-**状态信息**：
-- Cookie是否需要刷新
-- 刷新操作的执行结果
-- 错误信息和警告
-
-**自动保存**：
-- Cookie状态会保存到 `bilibili_cookie.json`
-- 包含cookie、refresh_token和时间戳
-- 程序退出前自动保存
 
 ## 故障排除
 
@@ -415,6 +434,10 @@ reply_delay = 5
    - 智能退避避免频率限制
    - 降级到使用缓存
    - 记录详细日志
+
+## 免责声明
+
+本工具仅供学习和研究使用，请遵守B站的相关规定和API使用条款。使用本工具所产生的任何后果由用户自行承担。
 
 ## Star History
 

@@ -1,4 +1,8 @@
 *.log
+*.pyc
+*.pyd
+/__pycache__
+/logs
 /.idea
 /.vscode
 /.git
@@ -7,3 +11,4 @@ history.json
 video_history.json
 /bili_scraper.py
 /prompt.txt
+test.py

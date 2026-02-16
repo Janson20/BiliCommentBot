@@ -65,6 +65,7 @@ python config_gui.py
 - `check_interval`: 检查评论的间隔时间（秒）
 - `cookie_refresh_interval`: Cookie刷新间隔（分钟，默认30）
 - `auto_refresh_cookie`: 是否自动刷新Cookie（默认true）
+- `max_comment_pages`: 获取评论的最大页数（默认10，用于优化性能）
 
 #### DeepSeek API配置
 - `api_key`: DeepSeek API密钥
@@ -112,6 +113,7 @@ refresh_token = "刷新令牌（可选）"
 check_interval = 300  # 5分钟检查一次
 cookie_refresh_interval = 30  # 30分钟检查Cookie
 auto_refresh_cookie = true  # 启用Cookie自动刷新
+max_comment_pages = 10  # 获取评论的最大页数
 
 [deepseek]
 api_key = "sk-xxx"

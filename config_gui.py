@@ -150,6 +150,13 @@ class ConfigEditor:
         refresh_interval_entry.pack(anchor=tk.W, pady=(0, 10))
         refresh_interval_entry.insert(0, str(self.get_value("bilibili", "cookie_refresh_interval", 30)))
         self.widgets["bilibili.cookie_refresh_interval"] = (refresh_interval_entry, "int")
+
+        # 最大评论页数
+        ttk.Label(frame, text="获取评论的最大页数:").pack(anchor=tk.W)
+        max_pages_entry = ttk.Entry(frame, width=20)
+        max_pages_entry.pack(anchor=tk.W, pady=(0, 10))
+        max_pages_entry.insert(0, str(self.get_value("bilibili", "max_comment_pages", 10)))
+        self.widgets["bilibili.max_comment_pages"] = (max_pages_entry, "int")
     
     def create_rate_limit_tab(self):
         """创建频率限制配置标签页"""

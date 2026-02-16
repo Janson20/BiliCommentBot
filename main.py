@@ -10,6 +10,8 @@ import time
 import json
 import logging
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import toml
 import random
 import hashlib
@@ -25,20 +27,26 @@ class BilibiliCookieManager:
     实现Cookie的自动刷新功能
     """
 
-    def __init__(self, cookie_str: str = None, refresh_token: str = None):
+    def __init__(self, cookie_str: str = None, refresh_token: str = None, logger=None):
         """
         初始化Cookie管理器
 
         Args:
             cookie_str: Cookie字符串，格式为"SESSDATA=xxx; bili_jct=xxx; ..."
             refresh_token: 刷新令牌，可从登录响应中获取
+            logger: 日志记录器实例
         """
+        self.logger = logger  # 初始化logger
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Referer': 'https://www.bilibili.com/',
             'Origin': 'https://www.bilibili.com',
         })
+        # 配置连接池
+        adapter = HTTPAdapter(pool_connections=5, pool_maxsize=10)
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
 
         if cookie_str:
             self.set_cookie_from_str(cookie_str)
@@ -386,6 +394,15 @@ class BiliCommentBot:
         self.setup_logging()
         self.session = requests.Session()
 
+        # 配置连接池和重试策略
+        adapter = HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=Retry(total=0)  # 禁用默认重试，使用自定义重试逻辑
+        )
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+
         # 初始化请求头池
         self.user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -412,7 +429,7 @@ class BiliCommentBot:
 
         if self.config['bilibili']['cookie']:
             # 尝试从文件加载Cookie
-            self.cookie_manager = BilibiliCookieManager()
+            self.cookie_manager = BilibiliCookieManager(logger=self.logger)
             if self.cookie_manager.load_from_file('bilibili_cookie.json'):
                 self.logger.info("从文件加载Cookie成功")
                 # 合并session
@@ -421,7 +438,7 @@ class BiliCommentBot:
                 # 从配置文件加载Cookie
                 cookie_str = self.config['bilibili']['cookie']
                 refresh_token = self.config['bilibili'].get('refresh_token', '')
-                self.cookie_manager = BilibiliCookieManager(cookie_str, refresh_token)
+                self.cookie_manager = BilibiliCookieManager(cookie_str, refresh_token, logger=self.logger)
                 self.session.cookies.update(self.cookie_manager.session.cookies)
 
             # 提取CSRF token
@@ -462,7 +479,23 @@ class BiliCommentBot:
         self.load_video_cache()
 
         self.logger.info("B站评论自动回复机器人启动")
-    
+
+    def __enter__(self):
+        """支持上下文管理器"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """退出时保存状态"""
+        if self.cookie_manager:
+            try:
+                self.cookie_manager.save_to_file('bilibili_cookie.json')
+                self.logger.info("Cookie状态已保存")
+            except Exception as e:
+                self.logger.error(f"保存Cookie失败: {e}")
+        self.session.close()
+        # 忽略异常，让其传播
+        return False
+
     def extract_csrf_token(self, cookie: str) -> Optional[str]:
         """从Cookie中提取CSRF token (bili_jct)"""
         import re
@@ -880,16 +913,17 @@ class BiliCommentBot:
         """获取视频评论（遍历所有页）"""
         url = "https://api.bilibili.com/x/v2/reply"
         aid = self.bvid_to_aid(bvid)
-        
+
         if not aid:
             self.logger.error(f"视频 {bvid} 无法获取aid，跳过获取评论")
             return []
-        
+
         all_comments = []
         pn = 1
-        max_pn = 50  # 最大页数限制，防止无限循环
+        # 从配置读取最大页数限制，默认为10页以优化性能
+        max_pn = self.config['bilibili'].get('max_comment_pages', 10)
         page_size = 20  # 每页评论数（B站API限制，建议使用较小的值）
-        
+
         while pn <= max_pn:
             params = {
                 'type': 1,
@@ -1349,19 +1383,9 @@ class BiliCommentBot:
 
         except KeyboardInterrupt:
             self.logger.info("收到停止信号，机器人停止运行")
-            # 退出前保存Cookie状态
-            if self.cookie_manager:
-                self.cookie_manager.save_to_file('bilibili_cookie.json')
-                self.logger.info("Cookie状态已保存")
-        except Exception as e:
-            self.logger.error(f"运行异常: {e}")
-            # 异常时也尝试保存Cookie状态
-            if self.cookie_manager:
-                try:
-                    self.cookie_manager.save_to_file('bilibili_cookie.json')
-                except:
-                    pass
-            raise
+        finally:
+            # 确保退出时保存状态
+            self.__exit__(None, None, None)
 
 
 def main():

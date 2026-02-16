@@ -14,6 +14,8 @@ check_interval = 60
 auto_refresh_cookie = true
 # Cookie刷新检查间隔（分钟）
 cookie_refresh_interval = 30
+# 获取评论的最大页数
+max_comment_pages = 10
 
 # 请求频率控制配置
 [rate_limit]

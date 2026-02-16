@@ -3,6 +3,7 @@
 """
 B站评论自动回复机器人
 使用DeepSeek API自动回复B站视频的新增评论
+本项目基于 MIT 协议开源。
 """
 
 import os

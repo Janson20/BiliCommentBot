@@ -1,5 +1,12 @@
 # B站评论自动回复机器人
 
+![GitHub语言](https://img.shields.io/github/languages/top/Janson20/BiliCommentBot) 
+![GitHub星数](https://img.shields.io/github/stars/Janson20/BiliCommentBot) 
+![Fork数](https://img.shields.io/github/forks/Janson20/BiliCommentBot) 
+![GitHub协议](https://img.shields.io/github/license/Janson20/BiliCommentBot) 
+![最新发行版](https://img.shields.io/github/v/release/Janson20/BiliCommentBot) 
+![议题](https://img.shields.io/github/issues/Janson20/BiliCommentBot)
+
 使用DeepSeek API自动回复B站账号下视频的新增评论的Python机器人。
 
 ## 功能特性

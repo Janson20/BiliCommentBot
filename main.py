@@ -429,20 +429,27 @@ class BiliCommentBot:
         self.auto_refresh_cookie = self.config['bilibili'].get('auto_refresh_cookie', True)
 
         if self.config['bilibili']['cookie']:
-            # 尝试从文件加载Cookie
+            # 优先从配置文件加载Cookie
+            cookie_str = self.config['bilibili']['cookie']
+            refresh_token = self.config['bilibili'].get('refresh_token', '')
+            self.cookie_manager = BilibiliCookieManager(cookie_str, refresh_token, logger=self.logger)
+            self.session.cookies.update(self.cookie_manager.session.cookies)
+            self.logger.info("从配置文件加载Cookie成功")
+
+            # 尝试从文件加载refresh_token（如果配置文件中没有的话）
+            if not refresh_token:
+                if self.cookie_manager.load_from_file('bilibili_cookie.json'):
+                    self.logger.info("从文件加载refresh_token成功")
+                    self.session.cookies.update(self.cookie_manager.session.cookies)
+        elif os.path.exists('bilibili_cookie.json'):
+            # 配置文件没有cookie时，尝试从文件加载（兼容旧版本）
             self.cookie_manager = BilibiliCookieManager(logger=self.logger)
             if self.cookie_manager.load_from_file('bilibili_cookie.json'):
                 self.logger.info("从文件加载Cookie成功")
-                # 合并session
-                self.session.cookies.update(self.cookie_manager.session.cookies)
-            else:
-                # 从配置文件加载Cookie
-                cookie_str = self.config['bilibili']['cookie']
-                refresh_token = self.config['bilibili'].get('refresh_token', '')
-                self.cookie_manager = BilibiliCookieManager(cookie_str, refresh_token, logger=self.logger)
                 self.session.cookies.update(self.cookie_manager.session.cookies)
 
-            # 提取CSRF token
+        # 提取CSRF token
+        if self.cookie_manager:
             self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
 
             # 如果启用了自动刷新，启动时检查一次

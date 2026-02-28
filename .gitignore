@@ -12,3 +12,6 @@ video_history.json
 /bili_scraper.py
 /prompt.txt
 test.py
+/build
+/dist
+*.spec

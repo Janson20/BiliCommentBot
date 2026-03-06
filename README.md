@@ -73,6 +73,7 @@ python config_gui.py
 - `cookie_refresh_interval`: Cookie刷新间隔（分钟，默认30）
 - `auto_refresh_cookie`: 是否自动刷新Cookie（默认true）
 - `max_comment_pages`: 获取评论的最大页数（默认10，用于优化性能）
+- `max_video_pages`: 获取视频列表的最大页数（默认5，用于优化性能）
 
 #### DeepSeek API配置
 - `api_key`: DeepSeek API密钥
@@ -121,6 +122,7 @@ check_interval = 300  # 5分钟检查一次
 cookie_refresh_interval = 30  # 30分钟检查Cookie
 auto_refresh_cookie = true  # 启用Cookie自动刷新
 max_comment_pages = 10  # 获取评论的最大页数
+max_video_pages = 5  # 获取视频列表的最大页数
 
 [deepseek]
 api_key = "sk-xxx"
@@ -266,11 +268,14 @@ refresh_token 通常在登录B站时的响应中获取，可以通过以下方�
 }
 ```
 
-**配置缓存时间**：
+**配置缓存时间和分页**：
 ```toml
 [video_cache]
 expire_time = 43200  # 12小时（单位：秒）
 cache_file = "video_cache.json"
+
+# 也可以在 [bilibili] 中配置获取的最大页数
+max_video_pages = 5  # 默认获取5页，每页20个视频，最多获取100个视频
 ```
 
 **清除缓存**：删除 `video_cache.json` 文件后重启程序即可。

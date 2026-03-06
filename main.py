@@ -789,7 +789,7 @@ class BiliCommentBot:
             self.logger.addHandler(console_handler)
     
     def get_video_list(self) -> List[Dict]:
-        """获取用户的视频列表（12小时缓存）"""
+        """获取用户的视频列表，支持分页获取（12小时缓存）"""
         uid = self.config['bilibili']['uid']
         if not uid:
             self.logger.error("未配置B站用户ID")
@@ -807,63 +807,87 @@ class BiliCommentBot:
         # 缓存过期或不存在，重新获取
         self.logger.info("视频列表缓存已过期，重新获取...")
         
-        url = f"https://api.bilibili.com/x/space/arc/search"
-        params = {
-            'mid': uid,
-            'ps': 20,
-            'pn': 1,
-            'order': 'pubdate'
-        }
+        # 从配置读取最大页数限制，默认为5页以优化性能
+        max_pn = self.config['bilibili'].get('max_video_pages', 5)
+        page_size = 20  # 每页视频数（B站API限制）
         
-        try:
-            response = self.make_request_with_retry('GET', url, params=params, use_cache=False)
-            if not response:
-                # 如果获取失败，尝试使用旧缓存
-                if self.cached_videos:
-                    self.logger.warning("获取视频列表失败，使用过期缓存")
-                    return self.cached_videos
-                return []
+        all_videos = []
+        pn = 1
+        
+        url = f"https://api.bilibili.com/x/space/arc/search"
+        
+        while pn <= max_pn:
+            params = {
+                'mid': uid,
+                'ps': page_size,
+                'pn': pn,
+                'order': 'pubdate'
+            }
             
-            # 解压响应内容
-            response_text = self.decompress_response(response)
-            
-            if not response_text:
-                self.logger.error("获取视频列表失败，响应内容为空")
-                if self.cached_videos:
-                    self.logger.warning("使用过期缓存")
-                    return self.cached_videos
-                return []
-            
-            # 尝试解析JSON
             try:
-                data = json.loads(response_text)
-            except json.JSONDecodeError as e:
-                self.logger.error(f"视频列表JSON解析失败: {e}")
-                self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
-                if self.cached_videos:
-                    self.logger.warning("使用过期缓存")
-                    return self.cached_videos
-                return []
-            
-            if data.get('code') == 0:
-                videos = data['data']['list']['vlist']
-                self.cached_videos = videos
-                self.last_video_fetch_time = current_time
-                self.save_video_cache(videos)
-                self.logger.info(f"成功获取视频列表，共 {len(videos)} 个视频")
-                return videos
-            else:
-                self.logger.error(f"获取视频列表失败: {data.get('message')}")
-                # 如果获取失败，尝试使用旧缓存
-                if self.cached_videos:
-                    self.logger.warning("使用过期缓存")
-                    return self.cached_videos
-                return []
-        except Exception as e:
-            self.logger.error(f"获取视频列表异常: {e}")
+                response = self.make_request_with_retry('GET', url, params=params, use_cache=False)
+                if not response:
+                    self.logger.warning(f"获取视频列表第{pn}页请求失败，停止分页")
+                    break
+                
+                # 解压响应内容
+                response_text = self.decompress_response(response)
+                
+                if not response_text:
+                    self.logger.error(f"获取视频列表第{pn}页响应内容为空，停止分页")
+                    break
+                
+                # 尝试解析JSON
+                try:
+                    data = json.loads(response_text)
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"视频列表第{pn}页JSON解析失败: {e}")
+                    self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
+                    break
+                
+                if data.get('code') == 0:
+                    page_videos = data.get('data', {}).get('list', {}).get('vlist', [])
+                    
+                    if not page_videos:
+                        # 没有更多视频了
+                        self.logger.info(f"视频列表第{pn}页无视频，停止分页")
+                        break
+                    
+                    # 解析当前页的视频
+                    for video in page_videos:
+                        all_videos.append(video)
+                    
+                    self.logger.info(f"第{pn}页获取到 {len(page_videos)} 个视频，累计 {len(all_videos)} 个")
+                    
+                    # 检查是否还有更多页面
+                    page_info = data.get('data', {}).get('page', {})
+                    count = page_info.get('count', 0)  # 总视频数
+                    size = page_info.get('size', page_size)  # 每页大小
+                    
+                    # 如果当前页的视频数小于页面大小，说明没有更多视频了
+                    if len(page_videos) < size:
+                        self.logger.info(f"已获取所有视频，共 {len(all_videos)} 个")
+                        break
+                    
+                    pn += 1
+                else:
+                    error_msg = data.get('message', '')
+                    self.logger.error(f"获取视频列表第{pn}页失败: {error_msg}")
+                    break
+            except Exception as e:
+                self.logger.error(f"获取视频列表第{pn}页异常: {e}")
+                break
+        
+        if all_videos:
+            self.cached_videos = all_videos
+            self.last_video_fetch_time = current_time
+            self.save_video_cache(all_videos)
+            self.logger.info(f"成功获取视频列表，共 {len(all_videos)} 个视频")
+            return all_videos
+        else:
             # 如果获取失败，尝试使用旧缓存
             if self.cached_videos:
-                self.logger.warning("使用过期缓存")
+                self.logger.warning("获取视频列表失败，使用过期缓存")
                 return self.cached_videos
             return []
     

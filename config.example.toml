@@ -16,6 +16,8 @@ auto_refresh_cookie = true
 cookie_refresh_interval = 30
 # 获取评论的最大页数
 max_comment_pages = 10
+# 获取视频的最大页数
+max_video_pages = 10
 
 # 请求频率控制配置
 [rate_limit]

@@ -456,6 +456,17 @@ class BiliCommentBot:
             if self.auto_refresh_cookie and self.cookie_manager.refresh_token:
                 self.logger.info("启动时检查Cookie状态...")
                 self.refresh_cookie_if_needed()
+
+            # 验证登录状态
+            self.logger.info("验证登录状态...")
+            is_valid, verify_result = self.cookie_manager.verify_cookie()
+            if is_valid:
+                user_info = verify_result.get('user_info', {})
+                self.logger.info(f"登录状态验证成功，当前用户: {user_info.get('name', 'N/A')} (mid: {user_info.get('mid', 'N/A')})")
+            else:
+                self.logger.error(f"登录状态验证失败: {verify_result.get('message')}")
+                if verify_result.get('code') == -101:
+                    self.logger.error("错误: 账号未登录或Cookie已过期，请重新获取Cookie")
         else:
             self.csrf_token = None
 
@@ -1211,6 +1222,17 @@ class BiliCommentBot:
         if not self.csrf_token:
             self.logger.error("未找到CSRF token，无法回复评论")
             return False
+
+        # 验证登录状态
+        if self.cookie_manager:
+            is_valid, verify_result = self.cookie_manager.verify_cookie()
+            if not is_valid:
+                error_msg = verify_result.get('message', '未知错误')
+                error_code = verify_result.get('code')
+                self.logger.error(f"回复评论失败: 账号未登录或Cookie已过期 ({error_msg})")
+                if error_code == -101:
+                    self.logger.error("Cookie已失效，请重新获取Cookie并确保包含SESSDATA和bili_jct字段")
+                return False
 
         url = "https://api.bilibili.com/x/v2/reply/add"
 

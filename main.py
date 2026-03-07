@@ -177,7 +177,9 @@ class BilibiliCookieManager:
         Returns:
             Tuple[bool, Dict]: (是否成功, 响应信息)
         """
+        self.logger.info("开始刷新Cookie")
         if not refresh_token and not self.refresh_token:
+            self.logger.error("refresh_token不存在，无法刷新Cookie")
             return False, {'message': 'refresh_token不存在'}
 
         token = refresh_token or self.refresh_token
@@ -185,15 +187,20 @@ class BilibiliCookieManager:
         # 获取refresh_csrf
         refresh_csrf = self.get_refresh_csrf()
         if not refresh_csrf:
+            self.logger.error("获取refresh_csrf失败")
             return False, {'message': '获取refresh_csrf失败'}
+
+        self.logger.debug(f"获取refresh_csrf成功: {refresh_csrf[:10] if refresh_csrf else 'None'}...")
 
         # 获取CSRF token
         csrf_token = self._get_csrf_from_cookie()
         if not csrf_token:
+            self.logger.error("从Cookie中获取CSRF token失败")
             return False, {'message': '从Cookie中获取CSRF token失败'}
 
         # 刷新Cookie
         url = 'https://passport.bilibili.com/x/passport-login/web/cookie/refresh'
+        self.logger.debug(f"刷新Cookie API: {url}")
 
         params = {
             'csrf': csrf_token,
@@ -203,9 +210,11 @@ class BilibiliCookieManager:
         }
 
         try:
+            self.logger.debug(f"刷新Cookie请求参数: csrf={csrf_token[:10]}..., refresh_csrf={refresh_csrf[:10]}...")
             response = self.session.post(url, data=params)
             response.raise_for_status()
             data = response.json()
+            self.logger.debug(f"刷新Cookie响应: code={data.get('code')}, message={data.get('message')}")
 
             if data.get('code') == 0:
                 response_data = data.get('data', {})
@@ -328,19 +337,24 @@ class BilibiliCookieManager:
         # 检查关键Cookie是否存在
         sessdata = self.session.cookies.get('SESSDATA')
         bili_jct = self.session.cookies.get('bili_jct')
+        self.logger.debug(f"验证Cookie: SESSDATA存在={bool(sessdata)}, bili_jct存在={bool(bili_jct)}")
         if not sessdata or not bili_jct:
+            self.logger.warning("关键Cookie缺失: SESSDATA或bili_jct")
             return False, {'message': '关键Cookie缺失 (SESSDATA或bili_jct)'}
 
         # 调用B站API验证登录状态
         url = 'https://api.bilibili.com/x/space/myinfo'
+        self.logger.debug(f"验证登录状态, API: {url}")
 
         try:
             response = self.session.get(url)
             response.raise_for_status()
             data = response.json()
+            self.logger.debug(f"验证登录状态响应: code={data.get('code')}")
 
             if data.get('code') == 0:
                 user_info = data.get('data', {})
+                self.logger.info(f"Cookie验证成功, 用户: {user_info.get('name')}, mid: {user_info.get('mid')}")
                 return True, {
                     'message': 'Cookie有效，已登录',
                     'user_info': {
@@ -349,11 +363,13 @@ class BilibiliCookieManager:
                     }
                 }
             else:
+                self.logger.warning(f"Cookie验证失败: code={data.get('code')}, message={data.get('message')}")
                 return False, {
                     'message': f'Cookie验证失败: {data.get("message", "未知错误")}',
                     'code': data.get('code')
                 }
         except Exception as e:
+            self.logger.error(f"验证Cookie请求异常: {str(e)}", exc_info=True)
             return False, {'message': f'验证请求异常: {str(e)}', 'error': str(e)}
 
     def auto_refresh_if_needed(self) -> Tuple[bool, Dict]:
@@ -393,6 +409,9 @@ class BiliCommentBot:
         """初始化机器人"""
         self.config = self.load_config(config_path)
         self.setup_logging()
+        self.logger.info("="*50)
+        self.logger.info("B站评论自动回复机器人初始化开始")
+        self.logger.info(f"配置文件: {config_path}")
         self.session = requests.Session()
 
         # 配置连接池和重试策略
@@ -451,11 +470,14 @@ class BiliCommentBot:
         # 提取CSRF token
         if self.cookie_manager:
             self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
+            self.logger.debug(f"CSRF Token提取成功: {self.csrf_token[:10] if self.csrf_token else 'None'}...")
 
             # 如果启用了自动刷新，启动时检查一次
             if self.auto_refresh_cookie and self.cookie_manager.refresh_token:
                 self.logger.info("启动时检查Cookie状态...")
                 self.refresh_cookie_if_needed()
+            else:
+                self.logger.info(f"自动刷新Cookie: {self.auto_refresh_cookie}, refresh_token存在: {bool(self.cookie_manager.refresh_token)}")
 
             # 验证登录状态
             self.logger.info("验证登录状态...")
@@ -464,11 +486,12 @@ class BiliCommentBot:
                 user_info = verify_result.get('user_info', {})
                 self.logger.info(f"登录状态验证成功，当前用户: {user_info.get('name', 'N/A')} (mid: {user_info.get('mid', 'N/A')})")
             else:
-                self.logger.error(f"登录状态验证失败: {verify_result.get('message')}")
+                self.logger.error(f"登录状态验证失败: {verify_result.get('message')}, code: {verify_result.get('code')}")
                 if verify_result.get('code') == -101:
                     self.logger.error("错误: 账号未登录或Cookie已过期，请重新获取Cookie")
         else:
             self.csrf_token = None
+            self.logger.warning("未初始化Cookie管理器")
 
         self.processed_comments = set()
         self.history_file = "history.json"
@@ -671,6 +694,12 @@ class BiliCommentBot:
     
     def make_request_with_retry(self, method: str, url: str, use_cache: bool = True, **kwargs) -> Optional[requests.Response]:
         """带重试机制的智能请求"""
+        self.logger.debug(f"发起请求: {method} {url}")
+        if kwargs.get('params'):
+            self.logger.debug(f"请求参数: {kwargs['params']}")
+        if kwargs.get('data'):
+            self.logger.debug(f"POST数据: {kwargs['data']}")
+
         # 检查缓存（仅对GET请求）
         if use_cache and method.upper() == 'GET':
             cache_key = self.get_cache_key(url, kwargs.get('params'))
@@ -698,8 +727,9 @@ class BiliCommentBot:
                 self.rate_limit_request()
                 
                 response = self.session.request(method, url, **kwargs)
-                
+
                 # 检查响应状态
+                self.logger.debug(f"响应状态码: {response.status_code}, 内容长度: {len(response.text) if response.text else 0}")
                 if response.status_code == 429 or "请求过于频繁" in response.text:
                     self.consecutive_failures += 1
                     if attempt < self.max_retries - 1:
@@ -740,9 +770,11 @@ class BiliCommentBot:
                             data = json.loads(response_text)
                             cache_key = self.get_cache_key(url, kwargs.get('params'))
                             self.set_cache(cache_key, data)
+                            self.logger.debug(f"请求成功，缓存数据: {cache_key}")
                     except:
                         pass  # 如果不是JSON响应，忽略缓存
-                
+
+                self.logger.debug(f"请求完成，返回响应")
                 return response
                 
             except requests.exceptions.RequestException as e:
@@ -801,11 +833,13 @@ class BiliCommentBot:
     
     def get_video_list(self) -> List[Dict]:
         """获取用户的视频列表，支持分页获取（12小时缓存）"""
+        self.logger.debug("开始获取视频列表")
         uid = self.config['bilibili']['uid']
         if not uid:
             self.logger.error("未配置B站用户ID")
             return []
-        
+
+        self.logger.info(f"获取用户视频列表, UID: {uid}")
         current_time = time.time()
         time_since_last_fetch = current_time - self.last_video_fetch_time
         
@@ -834,7 +868,8 @@ class BiliCommentBot:
                 'pn': pn,
                 'order': 'pubdate'
             }
-            
+
+            self.logger.debug(f"请求视频列表第{pn}页, 参数: {params}")
             try:
                 response = self.make_request_with_retry('GET', url, params=params, use_cache=False)
                 if not response:
@@ -858,17 +893,18 @@ class BiliCommentBot:
                 
                 if data.get('code') == 0:
                     page_videos = data.get('data', {}).get('list', {}).get('vlist', [])
-                    
+
                     if not page_videos:
                         # 没有更多视频了
                         self.logger.info(f"视频列表第{pn}页无视频，停止分页")
                         break
-                    
+
                     # 解析当前页的视频
                     for video in page_videos:
                         all_videos.append(video)
-                    
+
                     self.logger.info(f"第{pn}页获取到 {len(page_videos)} 个视频，累计 {len(all_videos)} 个")
+                    self.logger.debug(f"视频列表第{pn}页响应: code={data.get('code')}, count={data.get('data', {}).get('page', {}).get('count', 0)}")
                     
                     # 检查是否还有更多页面
                     page_info = data.get('data', {}).get('page', {})
@@ -954,6 +990,7 @@ class BiliCommentBot:
     
     def get_video_comments(self, bvid: str) -> List[Comment]:
         """获取视频评论（遍历所有页）"""
+        self.logger.debug(f"开始获取视频 {bvid} 的评论")
         url = "https://api.bilibili.com/x/v2/reply"
         aid = self.bvid_to_aid(bvid)
 
@@ -961,6 +998,7 @@ class BiliCommentBot:
             self.logger.error(f"视频 {bvid} 无法获取aid，跳过获取评论")
             return []
 
+        self.logger.info(f"视频 {bvid} 的aid: {aid}，开始获取评论")
         all_comments = []
         pn = 1
         # 从配置读取最大页数限制，默认为10页以优化性能
@@ -975,20 +1013,21 @@ class BiliCommentBot:
                 'ps': page_size,
                 'sort': 2  # 按时间排序
             }
-            
+
+            self.logger.debug(f"请求评论第{pn}页, 参数: {params}")
             try:
                 response = self.make_request_with_retry('GET', url, params=params)
                 if not response:
                     self.logger.warning(f"视频 {bvid} 第{pn}页请求失败，停止获取")
                     break
-                
+
                 # 解压响应内容
                 response_text = self.decompress_response(response)
-                
+
                 if not response_text:
                     self.logger.error(f"视频 {bvid} 第{pn}页响应内容为空，停止获取")
                     break
-                
+
                 # 记录响应内容的前200个字符用于调试
                 self.logger.debug(f"视频 {bvid} 第{pn}页响应内容预览: {response_text[:200]}")
                 
@@ -1002,12 +1041,12 @@ class BiliCommentBot:
                 
                 if data.get('code') == 0:
                     replies = data.get('data', {}).get('replies', [])
-                    
+
                     if not replies:
                         # 没有更多评论了
                         self.logger.info(f"视频 {bvid} 第{pn}页无评论，停止获取")
                         break
-                    
+
                     # 解析当前页的评论
                     for reply in replies:
                         comment = Comment(
@@ -1018,8 +1057,9 @@ class BiliCommentBot:
                             time=reply['ctime']
                         )
                         all_comments.append(comment)
-                    
+
                     self.logger.info(f"视频 {bvid} 第{pn}页获取到 {len(replies)} 条评论，累计 {len(all_comments)} 条")
+                    self.logger.debug(f"评论响应: code={data.get('code')}, total={data.get('data', {}).get('page', {}).get('count', 0)}")
                     
                     # 检查是否还有更多页面
                     page_info = data.get('data', {}).get('page', {})
@@ -1061,9 +1101,10 @@ class BiliCommentBot:
     
     def bvid_to_aid(self, bvid: str) -> str:
         """将BV号转换为AV号"""
+        self.logger.debug(f"BV转AV: {bvid}")
         url = "https://api.bilibili.com/x/web-interface/view"
         params = {'bvid': bvid}
-        
+
         try:
             response = self.make_request_with_retry('GET', url, params=params)
             if not response:
@@ -1109,12 +1150,15 @@ class BiliCommentBot:
         Returns:
             生成的回复内容
         """
+        self.logger.debug(f"开始生成回复, 评论内容: {comment[:50]}...")
         api_config = self.config['deepseek']
 
         headers = {
             'Authorization': f"Bearer {api_config['api_key']}",
             'Content-Type': 'application/json'
         }
+
+        self.logger.debug(f"DeepSeek API配置: model={api_config['model']}, base_url={api_config['base_url']}")
 
         # 从配置文件读取系统提示词
         system_prompt = api_config.get('system_prompt',
@@ -1144,6 +1188,7 @@ class BiliCommentBot:
         }
 
         try:
+            self.logger.debug(f"DeepSeek API请求: {api_config['base_url']}/chat/completions")
             response = requests.post(
                 f"{api_config['base_url']}/chat/completions",
                 headers=headers,
@@ -1160,11 +1205,12 @@ class BiliCommentBot:
                 self.logger.error(f"DeepSeek API调用失败: {response.status_code}, {response.text}")
                 return None
         except Exception as e:
-            self.logger.error(f"DeepSeek API调用异常: {e}")
+            self.logger.error(f"DeepSeek API调用异常: {e}", exc_info=True)
             return None
     
     def like_comment(self, bvid: str, comment_id: str) -> bool:
         """给评论点赞"""
+        self.logger.debug(f"点赞评论: bvid={bvid}, comment_id={comment_id}")
         # 确保使用最新的CSRF token
         if self.cookie_manager:
             self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
@@ -1174,15 +1220,17 @@ class BiliCommentBot:
             return False
 
         url = "https://api.bilibili.com/x/v2/reply/action"
+        aid = self.bvid_to_aid(bvid)
 
         data = {
             'type': 1,
-            'oid': self.bvid_to_aid(bvid),
+            'oid': aid,
             'rpid': comment_id,
             'action': 1,  # 1表示点赞，2表示取消点赞
             'csrf': self.csrf_token
         }
 
+        self.logger.debug(f"点赞API请求: {url}, data={data}")
         try:
             response = self.make_request_with_retry('POST', url, data=data)
             if not response:
@@ -1215,6 +1263,7 @@ class BiliCommentBot:
     
     def reply_comment(self, bvid: str, comment_id: str, content: str) -> bool:
         """回复评论"""
+        self.logger.info(f"准备回复评论, bvid={bvid}, comment_id={comment_id}")
         # 确保使用最新的CSRF token
         if self.cookie_manager:
             self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
@@ -1223,32 +1272,38 @@ class BiliCommentBot:
             self.logger.error("未找到CSRF token，无法回复评论")
             return False
 
+        self.logger.debug(f"CSRF Token: {self.csrf_token[:10] if self.csrf_token else 'None'}...")
+
         # 验证登录状态
         if self.cookie_manager:
             is_valid, verify_result = self.cookie_manager.verify_cookie()
             if not is_valid:
                 error_msg = verify_result.get('message', '未知错误')
                 error_code = verify_result.get('code')
-                self.logger.error(f"回复评论失败: 账号未登录或Cookie已过期 ({error_msg})")
+                self.logger.error(f"回复评论失败: 账号未登录或Cookie已过期 ({error_msg}), code={error_code}")
                 if error_code == -101:
                     self.logger.error("Cookie已失效，请重新获取Cookie并确保包含SESSDATA和bili_jct字段")
                 return False
 
         url = "https://api.bilibili.com/x/v2/reply/add"
+        aid = self.bvid_to_aid(bvid)
+        self.logger.debug(f"回复评论 API: {url}, aid={aid}")
 
         # 添加回复前缀
         prefix = self.config['reply']['prefix']
         reply_content = f"{prefix}{content}"
+        self.logger.debug(f"回复内容: {reply_content}")
 
         data = {
             'type': 1,
-            'oid': self.bvid_to_aid(bvid),
+            'oid': aid,
             'root': comment_id,
             'parent': comment_id,
             'message': reply_content,
             'csrf': self.csrf_token
         }
 
+        self.logger.debug(f"POST数据: {data}")
         try:
             response = self.make_request_with_retry('POST', url, data=data)
             if not response:
@@ -1356,6 +1411,8 @@ class BiliCommentBot:
 
     def process_comments(self):
         """处理评论"""
+        self.logger.debug("="*30)
+        self.logger.debug("开始处理评论")
         # 检查并刷新Cookie（如果需要）
         if self.auto_refresh_cookie:
             self.refresh_cookie_if_needed()
@@ -1366,20 +1423,27 @@ class BiliCommentBot:
 
         videos = self.get_video_list()
         if not videos:
+            self.logger.debug("没有获取到视频列表")
             return
 
+        self.logger.info(f"获取到 {len(videos)} 个视频，开始处理评论")
         max_process = self.config['reply']['max_process']
         processed_count = 0
 
         # 获取上下文评论数量配置
         context_count = self.config['reply'].get('context_comments_count', 0)
+        self.logger.debug(f"最大处理数: {max_process}, 上下文评论数: {context_count}")
 
         for video in videos:
             if processed_count >= max_process:
+                self.logger.info(f"已处理 {processed_count} 条评论，达到最大处理数 {max_process}，停止处理")
                 break
 
             bvid = video['bvid']
+            title = video.get('title', '未知标题')
+            self.logger.info(f"处理视频: {bvid}, 标题: {title}")
             comments = self.get_video_comments(bvid)
+            self.logger.debug(f"视频 {bvid} 获取到 {len(comments)} 条评论")
 
             for idx, comment in enumerate(comments):
                 if processed_count >= max_process:
@@ -1387,7 +1451,10 @@ class BiliCommentBot:
 
                 # 检查是否已处理过
                 if comment.comment_id in self.processed_comments:
+                    self.logger.debug(f"评论 {comment.comment_id} 已处理过，跳过")
                     continue
+
+                self.logger.info(f"处理新评论: id={comment.comment_id}, 用户={comment.user}, 内容={comment.content[:30]}...")
 
                 # 检查是否只处理新评论
                 if self.config['reply']['only_new']:
@@ -1404,35 +1471,50 @@ class BiliCommentBot:
                     self.logger.debug(f"评论 {comment.comment_id} 使用前 {len(context_comments)} 条评论作为上下文")
 
                 # 生成回复（带上上下文）
+                self.logger.debug(f"调用DeepSeek生成回复...")
                 reply_content = self.generate_reply(comment.content, context_comments)
                 if reply_content:
+                    self.logger.debug(f"生成的回复: {reply_content[:50]}...")
                     # 如果启用了点赞功能，先点赞评论
                     if self.config['reply'].get('like_enabled', False):
+                        self.logger.debug(f"点赞评论: {comment.comment_id}")
                         self.like_comment(bvid, comment.comment_id)
 
                     # 发送回复
+                    self.logger.info(f"发送回复: {reply_content[:30]}...")
                     if self.reply_comment(bvid, comment.comment_id, reply_content):
                         self.processed_comments.add(comment.comment_id)
                         # 保存到历史记录
                         self.save_history(comment, reply_content)
                         processed_count += 1
+                        self.logger.info(f"回复成功，已处理 {processed_count} 条评论")
 
                         # 延迟避免频繁操作
                         delay = self.config['reply']['reply_delay']
                         if delay > 0:
                             time.sleep(delay)
+                else:
+                    self.logger.warning(f"评论 {comment.comment_id} 生成回复失败，跳过")
     
     def run(self):
         """运行机器人"""
+        self.logger.info("="*50)
         self.logger.info("开始运行B站评论自动回复机器人")
+        self.logger.info(f"检查间隔: {self.config['bilibili']['check_interval']}秒")
+        self.logger.info("="*50)
 
         try:
             while True:
-                self.process_comments()
+                self.logger.info("-"*30)
+                self.logger.info("开始新一轮评论检查")
+                try:
+                    self.process_comments()
+                except Exception as e:
+                    self.logger.error(f"处理评论时发生异常: {e}", exc_info=True)
 
                 # 等待下次检查
                 interval = self.config['bilibili']['check_interval']
-                self.logger.info(f"等待 {interval} 秒后进行下次检查")
+                self.logger.info(f"本次检查完成，等待 {interval} 秒后进行下次检查")
                 time.sleep(interval)
 
         except KeyboardInterrupt:

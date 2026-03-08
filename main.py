@@ -1140,12 +1140,14 @@ class BiliCommentBot:
             self.logger.error(f"BV号 {bvid} 转换异常: {e}")
             return ""
     
-    def generate_reply(self, comment: str, context: List[Comment] = None) -> Optional[str]:
+    def generate_reply(self, comment: str, context: List[Comment] = None, video_title: str = None, video_desc: str = None) -> Optional[str]:
         """使用DeepSeek API生成回复
 
         Args:
             comment: 待回复的评论内容
             context: 前面N条评论作为上下文（可选）
+            video_title: 视频标题（可选）
+            video_desc: 视频简介（可选）
 
         Returns:
             生成的回复内容
@@ -1169,13 +1171,25 @@ class BiliCommentBot:
             {'role': 'system', 'content': system_prompt}
         ]
 
+        # 如果有视频标题和简介，添加到上下文信息中
+        video_context = ""
+        if video_title or video_desc:
+            video_context += "视频信息：\n"
+            if video_title:
+                video_context += f"标题：{video_title}\n"
+            if video_desc:
+                video_context += f"简介：{video_desc}\n"
+            video_context += "\n"
+
         # 如果有上下文评论，先添加到消息列表
-        if context:
-            context_text = "以下是前面的评论，可以帮助你理解上下文：\n\n"
-            for i, ctx_comment in enumerate(context, 1):
-                context_text += f"{i}. {ctx_comment.user}: {ctx_comment.content}\n"
-            messages.append({'role': 'user', 'content': context_text})
-            self.logger.debug(f"使用 {len(context)} 条评论作为上下文")
+        if context or video_context:
+            context_text = video_context
+            if context:
+                context_text += "以下是前面的评论，可以帮助你理解上下文：\n\n"
+                for i, ctx_comment in enumerate(context, 1):
+                    context_text += f"{i}. {ctx_comment.user}: {ctx_comment.content}\n"
+                self.logger.debug(f"使用 {len(context)} 条评论作为上下文")
+            messages.append({'role': 'user', 'content': context_text.strip()})
 
         # 添加当前需要回复的评论
         messages.append({'role': 'user', 'content': comment})
@@ -1470,9 +1484,11 @@ class BiliCommentBot:
                     context_comments = comments[start_idx:idx]
                     self.logger.debug(f"评论 {comment.comment_id} 使用前 {len(context_comments)} 条评论作为上下文")
 
-                # 生成回复（带上上下文）
+                # 生成回复（带上上下文和视频信息）
+                video_title = video.get('title', '')
+                video_desc = video.get('desc', '')
                 self.logger.debug(f"调用DeepSeek生成回复...")
-                reply_content = self.generate_reply(comment.content, context_comments)
+                reply_content = self.generate_reply(comment.content, context_comments, video_title, video_desc)
                 if reply_content:
                     self.logger.debug(f"生成的回复: {reply_content[:50]}...")
                     # 如果启用了点赞功能，先点赞评论

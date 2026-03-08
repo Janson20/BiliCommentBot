@@ -126,45 +126,61 @@ class BilibiliCookieManager:
 
         url = f'https://www.bilibili.com/correspond/1/{encoded_path}'
 
+        self.logger.info(f"获取refresh_csrf，访问URL: {url}")
+
         try:
-            response = self.session.get(url)
+            # 模拟浏览器访问
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            }
+            response = self.session.get(url, headers=headers)
             response.raise_for_status()
 
             # 从返回的HTML中提取refresh_csrf
-            # 通常位于JavaScript变量中
             html_content = response.text
 
-            # 尝试从HTML中提取refresh_csrf
-            # 尝试多种模式匹配
+            self.logger.debug(f"获取refresh_csrf响应长度: {len(html_content)}")
+
             import re
 
-            # 模式1: 匹配 "refresh_csrf":"value"
+            # 尝试多种模式匹配
             patterns = [
                 r'"refresh_csrf"\s*:\s*"([^"]+)"',
-                r'"refresh_csrf"\s*:\s*"((?:[^"\\]|\\.)*)"',  # 处理转义字符
+                r'"refresh_csrf"\s*:\s*"((?:[^"\\]|\\.)*)"',
                 r"refresh_csrf\s*=\s*'([^']+)'",
                 r"refresh_csrf\s*=\s*\"([^\"]+)\"",
-                r'"refresh_csrf"\s*:\s*([0-9a-f]+)',  # 匹配数字/字母组合（如MD5）
-                r"refresh_csrf['\"]?\s*[:=]\s*['\"]?([0-9a-zA-Z_-]+)['\"]?"  # 更宽松的匹配
+                r"refresh_csrf['\"]?\s*[:=]\s*['\"]?([0-9a-zA-Z_-]+)['\"]?",
+                r'window\.__refresh_csrf\s*=\s*["\']([^"\']+)["\']',
+                r'csrf["\']\s*:\s*["\']([^"\']+)["\']',
             ]
 
             for pattern in patterns:
                 match = re.search(pattern, html_content, re.IGNORECASE)
                 if match:
                     csrf_value = match.group(1)
-                    # 验证值不为空且不是纯数字
                     if csrf_value and csrf_value.strip():
+                        self.logger.info(f"成功从正则模式获取refresh_csrf: {csrf_value[:10]}...")
                         return csrf_value.strip()
 
-            # 如果都失败，打印部分HTML用于调试
-            # 找到包含refresh_csrf的行
-            lines_with_keyword = [line for line in html_content.split('\n') if 'refresh_csrf' in line.lower()]
+            # 如果正则匹配失败，尝试从Cookie中获取（某些情况下B站会返回refresh_csrf到Cookie）
+            refresh_csrf_cookie = self.session.cookies.get('refresh_csrf')
+            if refresh_csrf_cookie:
+                self.logger.info(f"从Cookie中获取refresh_csrf: {refresh_csrf_cookie[:10]}...")
+                return refresh_csrf_cookie
+
+            # 输出部分HTML用于调试
+            lines_with_keyword = [line for line in html_content.split('\n') if 'refresh' in line.lower() or 'csrf' in line.lower()]
             if lines_with_keyword:
-                self.logger.debug(f"找到包含refresh_csrf的行: {lines_with_keyword[:3]}")
+                self.logger.warning(f"找到包含refresh/csrf的行: {lines_with_keyword[:5]}")
+            else:
+                self.logger.warning(f"HTML中未找到refresh_csrf，响应前500字符: {html_content[:500]}")
 
             return None
 
         except Exception as e:
+            self.logger.error(f"获取refresh_csrf异常: {str(e)}")
             return None
 
     def refresh_cookie(self, refresh_token: str = None) -> Tuple[bool, Dict]:
@@ -177,30 +193,43 @@ class BilibiliCookieManager:
         Returns:
             Tuple[bool, Dict]: (是否成功, 响应信息)
         """
+        self.logger.info("="*30)
         self.logger.info("开始刷新Cookie")
+        self.logger.info("="*30)
+
         if not refresh_token and not self.refresh_token:
             self.logger.error("refresh_token不存在，无法刷新Cookie")
             return False, {'message': 'refresh_token不存在'}
 
         token = refresh_token or self.refresh_token
+        self.logger.info(f"refresh_token: {token[:20] if token else 'None'}...")
 
         # 获取refresh_csrf
         refresh_csrf = self.get_refresh_csrf()
         if not refresh_csrf:
-            self.logger.error("获取refresh_csrf失败")
+            self.logger.error("获取refresh_csrf失败，请检查网络连接或Cookie是否有效")
             return False, {'message': '获取refresh_csrf失败'}
 
-        self.logger.debug(f"获取refresh_csrf成功: {refresh_csrf[:10] if refresh_csrf else 'None'}...")
+        self.logger.info(f"获取refresh_csrf成功: {refresh_csrf[:10] if refresh_csrf else 'None'}...")
 
         # 获取CSRF token
         csrf_token = self._get_csrf_from_cookie()
         if not csrf_token:
             self.logger.error("从Cookie中获取CSRF token失败")
             return False, {'message': '从Cookie中获取CSRF token失败'}
+        self.logger.info(f"CSRF token: {csrf_token[:10] if csrf_token else 'None'}...")
 
         # 刷新Cookie
         url = 'https://passport.bilibili.com/x/passport-login/web/cookie/refresh'
-        self.logger.debug(f"刷新Cookie API: {url}")
+        self.logger.info(f"刷新Cookie API: {url}")
+
+        # 模拟浏览器请求
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://www.bilibili.com/',
+            'Origin': 'https://www.bilibili.com',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        }
 
         params = {
             'csrf': csrf_token,
@@ -210,50 +239,80 @@ class BilibiliCookieManager:
         }
 
         try:
-            self.logger.debug(f"刷新Cookie请求参数: csrf={csrf_token[:10]}..., refresh_csrf={refresh_csrf[:10]}...")
-            response = self.session.post(url, data=params)
-            response.raise_for_status()
-            data = response.json()
-            self.logger.debug(f"刷新Cookie响应: code={data.get('code')}, message={data.get('message')}")
+            self.logger.info(f"发送刷新Cookie请求...")
+            response = self.session.post(url, data=params, headers=headers)
+            self.logger.info(f"响应状态码: {response.status_code}")
+
+            # 记录响应内容用于调试
+            try:
+                data = response.json()
+                self.logger.info(f"刷新Cookie响应: code={data.get('code')}, message={data.get('message')}")
+
+                # 打印完整响应数据用于调试
+                if data.get('code') != 0:
+                    self.logger.warning(f"刷新失败，完整响应: {data}")
+
+            except json.JSONDecodeError:
+                self.logger.error(f"响应不是JSON格式: {response.text[:500]}")
+                return False, {'message': '响应解析失败'}
 
             if data.get('code') == 0:
                 response_data = data.get('data', {})
+                self.logger.info(f"刷新Cookie响应数据: {response_data}")
 
                 # 更新refresh_token
                 new_refresh_token = response_data.get('refresh_token')
                 if new_refresh_token:
                     self.refresh_token = new_refresh_token
+                    self.logger.info(f"更新refresh_token成功")
 
-                # 确认刷新，使旧的refresh_token失效
-                if self.confirm_refresh(new_refresh_token):
-                    # 刷新成功后，需要从响应中获取新的 Cookie
-                    # response.cookies 包含服务器返回的新 Cookie（如 set-cookie 头部）
-                    if hasattr(response, 'cookies') and response.cookies:
-                        # 将响应中的新 Cookie 更新到 session
-                        for cookie_name, cookie_value in response.cookies.items():
-                            self.session.cookies.set(cookie_name, cookie_value)
-                            self.logger.debug(f"更新Cookie: {cookie_name}")
-
-                    # 验证关键 Cookie 是否存在
-                    sessdata = self.session.cookies.get('SESSDATA')
-                    bili_jct = self.session.cookies.get('bili_jct')
-                    if not sessdata or not bili_jct:
-                        self.logger.warning(f"刷新后关键 Cookie 缺失: SESSDATA={bool(sessdata)}, bili_jct={bool(bili_jct)}")
+                # 尝试确认刷新，使旧的refresh_token失效
+                # 如果confirm_refresh失败，继续尝试获取新Cookie
+                confirm_success = False
+                if new_refresh_token:
+                    confirm_success = self.confirm_refresh(new_refresh_token)
+                    if confirm_success:
+                        self.logger.info("确认刷新成功")
                     else:
-                        self.logger.debug("刷新后关键 Cookie 存在")
+                        self.logger.warning("确认刷新失败，但继续尝试更新Cookie")
 
-                    return True, {
-                        'message': 'Cookie刷新成功',
-                        'data': response_data,
-                        'new_refresh_token': new_refresh_token,
-                        'cookies': dict(self.session.cookies)
-                    }
+                # 刷新成功后，需要从响应中获取新的 Cookie
+                # response.cookies 包含服务器返回的新 Cookie（如 set-cookie 头部）
+                if hasattr(response, 'cookies') and response.cookies:
+                    for cookie_name, cookie_value in response.cookies.items():
+                        self.session.cookies.set(cookie_name, cookie_value)
+                        self.logger.info(f"从响应更新Cookie: {cookie_name}")
+
+                # 验证关键 Cookie 是否存在
+                sessdata = self.session.cookies.get('SESSDATA')
+                bili_jct = self.session.cookies.get('bili_jct')
+                if not sessdata or not bili_jct:
+                    self.logger.warning(f"刷新后关键 Cookie 缺失: SESSDATA={bool(sessdata)}, bili_jct={bool(bili_jct)}")
                 else:
-                    return False, {'message': 'Cookie刷新确认失败'}
+                    self.logger.info("刷新后关键 Cookie 存在")
+
+                self.logger.info("="*30)
+                self.logger.info("Cookie刷新完成")
+                self.logger.info("="*30)
+
+                return True, {
+                    'message': 'Cookie刷新成功',
+                    'data': response_data,
+                    'new_refresh_token': new_refresh_token,
+                    'cookies': dict(self.session.cookies)
+                }
             else:
+                error_msg = data.get('message', '未知错误')
+                error_code = data.get('code')
+                self.logger.error(f"刷新失败: code={error_code}, message={error_msg}")
+
+                # 如果是-509错误（请求过于频繁），给出更明确的提示
+                if error_code == -509:
+                    self.logger.error("请求过于频繁，请稍后再试")
+
                 return False, {
-                    'message': f'刷新失败: {data.get("message", "未知错误")}',
-                    'code': data.get('code')
+                    'message': f'刷新失败: {error_msg}',
+                    'code': error_code
                 }
 
         except Exception as e:
@@ -272,11 +331,23 @@ class BilibiliCookieManager:
         Returns:
             bool: 是否成功
         """
+        self.logger.info("开始确认Cookie刷新...")
+
         csrf_token = self._get_csrf_from_cookie()
         if not csrf_token:
+            self.logger.error("确认刷新失败：无法获取CSRF token")
             return False
 
         url = 'https://passport.bilibili.com/x/passport-login/web/confirm/refresh'
+        self.logger.info(f"确认刷新API: {url}")
+
+        # 模拟浏览器请求
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://www.bilibili.com/',
+            'Origin': 'https://www.bilibili.com',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        }
 
         params = {
             'csrf': csrf_token,
@@ -284,13 +355,21 @@ class BilibiliCookieManager:
         }
 
         try:
-            response = self.session.post(url, data=params)
-            response.raise_for_status()
+            response = self.session.post(url, data=params, headers=headers)
+            self.logger.info(f"确认刷新响应状态码: {response.status_code}")
             data = response.json()
+            self.logger.info(f"确认刷新响应: code={data.get('code')}, message={data.get('message')}")
 
-            return data.get('code') == 0
+            success = data.get('code') == 0
+            if success:
+                self.logger.info("确认刷新成功")
+            else:
+                self.logger.warning(f"确认刷新失败: {data.get('message')}")
+
+            return success
 
         except Exception as e:
+            self.logger.error(f"确认刷新异常: {str(e)}")
             return False
 
     def get_cookie_str(self) -> str:

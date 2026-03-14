@@ -3,6 +3,7 @@
 """
 B站评论自动回复机器人配置工具
 GUI界面用于编辑config.toml配置文件
+包含B站扫码登录获取Cookie功能
 """
 
 import tkinter as tk
@@ -11,6 +12,142 @@ import tomllib
 import tomli_w
 from pathlib import Path
 from typing import Any
+import requests
+import time
+import tempfile
+import os
+import sys
+import threading
+
+
+# ── B站扫码登录获取Cookie ───────────────────────────────────
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www.bilibili.com",
+}
+
+GENERATE_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
+POLL_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
+
+
+def get_qrcode() -> tuple:
+    """请求生成二维码，返回 (qrcode_url, qrcode_key)"""
+    resp = requests.get(GENERATE_URL, headers=HEADERS, timeout=10)
+    data = resp.json()
+    if data["code"] != 0:
+        raise RuntimeError(f"获取二维码失败: {data}")
+    return data["data"]["url"], data["data"]["qrcode_key"]
+
+
+def _make_qr_image(url: str):
+    """生成二维码 PIL Image 对象"""
+    import qrcode
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=12,
+        border=4,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
+    return qr.make_image(fill_color="black", back_color="white")
+
+
+def _open_file(path: str):
+    """用系统默认程序打开文件"""
+    import subprocess
+    if sys.platform == "win32":
+        os.startfile(path)
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+
+
+def show_qrcode_image(url: str):
+    """弹出图片窗口展示二维码"""
+    img = _make_qr_image(url)
+    tmp_path = os.path.join(tempfile.gettempdir(), "bili_qrcode.png")
+    img.save(tmp_path)
+    _open_file(tmp_path)
+
+
+def format_cookies_text(cookies: dict) -> str:
+    """将cookie字典格式化为 key=value; 的字符串"""
+    return "; ".join(f"{k}={v}" for k, v in cookies.items())
+
+
+def poll_login(qrcode_key: str, session: requests.Session, status_callback=None):
+    """
+    轮询扫码状态，返回登录成功后的cookie字典，超时返回None。
+    status_callback: 回调函数，接收 (status_code, message) 用于更新UI
+    """
+    params = {"qrcode_key": qrcode_key}
+    timeout = 180
+    start = time.time()
+    last_status = None
+
+    while time.time() - start < timeout:
+        try:
+            resp = session.get(POLL_URL, params=params, headers=HEADERS, timeout=10)
+            data = resp.json()["data"]
+            code = data["code"]
+
+            if code != last_status:
+                last_status = code
+                if status_callback:
+                    if code == 86101:
+                        status_callback(code, "等待扫码...")
+                    elif code == 86090:
+                        status_callback(code, "已扫码，请在手机上确认登录")
+                    elif code == 86038:
+                        status_callback(code, "二维码已失效，请重试")
+                    elif code == 0:
+                        status_callback(code, "登录成功！")
+
+            if code == 86101:
+                time.sleep(1.5)
+            elif code == 86090:
+                time.sleep(1.5)
+            elif code == 86038:
+                return None
+            elif code == 0:
+                cookies = dict(session.cookies)
+                if data.get("url"):
+                    from urllib.parse import urlparse, parse_qs
+                    qs = parse_qs(urlparse(data["url"]).query)
+                    for k, v in qs.items():
+                        if k not in cookies:
+                            cookies[k] = v[0]
+                return cookies
+        except Exception as e:
+            if status_callback:
+                status_callback(-1, f"请求错误: {e}")
+            time.sleep(2)
+
+    return None
+
+
+def get_cookies_via_qrcode(status_callback=None):
+    """执行扫码登录获取Cookie"""
+    try:
+        qr_url, qr_key = get_qrcode()
+        show_qrcode_image(qr_url)
+        if status_callback:
+            status_callback(0, "请扫码登录")
+
+        session = requests.Session()
+        cookies = poll_login(qr_key, session, status_callback)
+        return cookies
+    except Exception as e:
+        if status_callback:
+            status_callback(-1, f"错误: {e}")
+        return None
 
 
 class ConfigEditor:
@@ -19,10 +156,13 @@ class ConfigEditor:
         self.config_path = Path(config_path)
         self.config_data = {}
         self.widgets = {}
+        self.cookie_text_widget = None
+        self.login_status_label = None
+        self.get_cookie_btn = None
         
         self.root.title("B站评论机器人配置工具")
-        self.root.geometry("800x700")
-        self.root.minsize(700, 600)
+        self.root.geometry("800x750")
+        self.root.minsize(700, 650)
         
         # 创建主框架
         self.main_frame = ttk.Frame(root, padding="10")
@@ -111,11 +251,27 @@ class ConfigEditor:
         self.notebook.add(frame, text="B站配置")
         
         # Cookie配置
-        ttk.Label(frame, text="B站Cookie（从浏览器获取）:").pack(anchor=tk.W)
-        cookie_text = scrolledtext.ScrolledText(frame, height=4, width=60)
-        cookie_text.pack(fill=tk.X, pady=(0, 10))
-        cookie_text.insert("1.0", self.get_value("bilibili", "cookie", ""))
-        self.widgets["bilibili.cookie"] = (cookie_text, "text")
+        ttk.Label(frame, text="B站Cookie:").pack(anchor=tk.W)
+        
+        # Cookie输入框和扫码按钮在同一行
+        cookie_frame = ttk.Frame(frame)
+        cookie_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        self.cookie_text_widget = scrolledtext.ScrolledText(cookie_frame, height=4, width=55)
+        self.cookie_text_widget.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=(0, 10))
+        self.cookie_text_widget.insert("1.0", self.get_value("bilibili", "cookie", ""))
+        self.widgets["bilibili.cookie"] = (self.cookie_text_widget, "text")
+        
+        # 扫码登录按钮
+        btn_frame = ttk.Frame(cookie_frame)
+        btn_frame.pack(side=tk.RIGHT, padx=(10, 0))
+        
+        self.get_cookie_btn = ttk.Button(btn_frame, text="扫码获取Cookie", command=self.start_get_cookie)
+        self.get_cookie_btn.pack(pady=(0, 5))
+        
+        # 状态标签
+        self.login_status_label = ttk.Label(frame, text="", foreground="blue")
+        self.login_status_label.pack(anchor=tk.W, pady=(0, 10))
         
         # 刷新令牌
         ttk.Label(frame, text="刷新令牌（用于自动刷新Cookie）:").pack(anchor=tk.W)
@@ -370,6 +526,40 @@ class ConfigEditor:
             self.create_deepseek_tab()
             self.create_reply_tab()
             self.create_logging_tab()
+
+    def update_login_status(self, code: int, message: str):
+        """更新登录状态（线程安全）"""
+        def _update():
+            self.login_status_label.config(text=message)
+            if code == 0:
+                self.login_status_label.config(foreground="green")
+            elif code == 86038 or code == -1:
+                self.login_status_label.config(foreground="red")
+                self.get_cookie_btn.config(state=tk.NORMAL)
+            else:
+                self.login_status_label.config(foreground="blue")
+        self.root.after(0, _update)
+
+    def start_get_cookie(self):
+        """开始获取Cookie（在线程中执行）"""
+        self.get_cookie_btn.config(state=tk.DISABLED)
+        self.login_status_label.config(text="正在获取二维码...", foreground="blue")
+        
+        def _get_cookie():
+            cookies = get_cookies_via_qrcode(status_callback=self.update_login_status)
+            if cookies:
+                cookie_str = format_cookies_text(cookies)
+                def _fill():
+                    self.cookie_text_widget.delete("1.0", tk.END)
+                    self.cookie_text_widget.insert("1.0", cookie_str)
+                self.root.after(0, _fill)
+            else:
+                def _reset_btn():
+                    self.get_cookie_btn.config(state=tk.NORMAL)
+                self.root.after(0, _reset_btn)
+        
+        thread = threading.Thread(target=_get_cookie, daemon=True)
+        thread.start()
 
 
 def main():

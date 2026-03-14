@@ -23,6 +23,7 @@
 - 🛡️ 智能频率控制和重试机制
 - 🎲 随机化请求头，避免被识别
 - 💾 Cookie持久化存储和管理
+- 📱 GUI扫码登录获取Cookie（推荐）
 
 ## 安装依赖
 
@@ -53,10 +54,12 @@ python config_gui.py
 - 自动读取现有配置内容
 - 一键保存配置文件
 - 支持重新加载配置
+- **扫码登录获取Cookie**（推荐）：点击按钮自动获取二维码，扫码后Cookie自动填入
 
 **运行要求：**
 - Python 3.11+（使用标准库 `tomllib`）
 - 需要安装 `tomli_w` 依赖（已在 requirements.txt 中）
+- 需要安装 `qrcode` 和 `Pillow` 依赖（用于生成二维码，已在 requirements.txt 中）
 
 ## 配置说明
 
@@ -158,6 +161,18 @@ console = true
 ## 获取凭证
 
 ### 获取B站Cookie
+
+#### 方式一：GUI扫码获取（推荐）
+
+使用 `config_gui.py` 配置工具：
+
+```bash
+python config_gui.py
+```
+
+在"B站配置"标签页，点击"扫码获取Cookie"按钮，会弹出二维码窗口。用B站APP扫描二维码并确认登录，Cookie会自动填入输入框，无需手动复制。
+
+#### 方式二：手动获取
 
 1. 登录B站网页版
 2. 按F12打开开发者工具

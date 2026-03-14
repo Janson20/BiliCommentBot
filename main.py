@@ -871,12 +871,53 @@ class BiliCommentBot:
     
     def load_config(self, config_path: str) -> dict:
         """加载配置文件"""
+        # 检查配置文件是否存在
+        if not os.path.exists(config_path):
+            print(f"错误：配置文件 {config_path} 不存在！")
+            print("请复制 config.example.toml 为 config.toml 并填写配置")
+            print("示例：copy config.example.toml config.toml")
+            raise FileNotFoundError(f"配置文件 {config_path} 不存在")
+
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
-                return toml.load(f)
+                config = toml.load(f)
+
+            # 检查必要配置项
+            errors = []
+
+            # 检查 bilibili 配置段
+            if 'bilibili' not in config:
+                errors.append("缺少 [bilibili] 配置段")
+            else:
+                if not config['bilibili'].get('uid'):
+                    errors.append("未配置 uid（B站用户ID）")
+                if not config['bilibili'].get('cookie'):
+                    errors.append("未配置 cookie（B站Cookie）")
+
+            # 检查 deepseek 配置段
+            if 'deepseek' not in config:
+                errors.append("缺少 [deepseek] 配置段")
+            else:
+                if not config['deepseek'].get('api_key'):
+                    errors.append("未配置 api_key（DeepSeek API密钥）")
+
+            if errors:
+                print("="*50)
+                print("配置检查失败，请完成以下配置：")
+                for error in errors:
+                    print(f"  - {error}")
+                print("="*50)
+                print(f"请编辑 {config_path} 文件完成配置")
+                raise Exception("配置不完整")
+
+            return config
+
         except FileNotFoundError:
-            raise FileNotFoundError(f"配置文件 {config_path} 不存在")
+            raise
         except Exception as e:
+            if "配置不完整" in str(e):
+                raise
+            print(f"错误：加载配置文件失败: {e}")
             raise Exception(f"加载配置文件失败: {e}")
     
     def setup_logging(self):
@@ -913,10 +954,18 @@ class BiliCommentBot:
     def get_video_list(self) -> List[Dict]:
         """获取用户的视频列表，支持分页获取（12小时缓存）"""
         self.logger.debug("开始获取视频列表")
-        uid = self.config['bilibili']['uid']
+
+        # 检查必要配置
+        uid = self.config['bilibili'].get('uid')
         if not uid:
-            self.logger.error("未配置B站用户ID")
+            self.logger.error("未配置B站用户ID，请在配置文件中设置 uid")
+            self.logger.error("提示：从B站个人主页URL中获取，如 https://space.bilibili.com/123456789 中的 123456789")
             return []
+
+        cookie = self.config['bilibili'].get('cookie', '')
+        if not cookie:
+            self.logger.warning("未配置B站Cookie，可能无法获取视频列表")
+            self.logger.warning("提示：请在配置文件中设置 cookie（从浏览器开发者工具中获取）")
 
         self.logger.info(f"获取用户视频列表, UID: {uid}")
         current_time = time.time()
@@ -998,12 +1047,24 @@ class BiliCommentBot:
                     pn += 1
                 else:
                     error_msg = data.get('message', '')
-                    self.logger.error(f"获取视频列表第{pn}页失败: {error_msg}")
+                    error_code = data.get('code', '')
+                    self.logger.error(f"获取视频列表第{pn}页失败: code={error_code}, message={error_msg}")
+
+                    # 针对常见错误给出解决方案
+                    if error_code == -401:  # 需要登录
+                        self.logger.error("错误：需要登录，请检查Cookie是否正确配置")
+                    elif error_code == -403:  # 权限不足
+                        self.logger.error("错误：无权限访问，可能Cookie已过期")
+                    elif error_code == -404:  # 用户不存在
+                        self.logger.error("错误：用户不存在，请检查UID是否正确")
+                    elif error_msg and 'Unauthorized' in error_msg:
+                        self.logger.error("错误：未授权，请检查Cookie是否包含有效的SESSDATA")
+
                     break
             except Exception as e:
                 self.logger.error(f"获取视频列表第{pn}页异常: {e}")
                 break
-        
+
         if all_videos:
             self.cached_videos = all_videos
             self.last_video_fetch_time = current_time
@@ -1015,6 +1076,14 @@ class BiliCommentBot:
             if self.cached_videos:
                 self.logger.warning("获取视频列表失败，使用过期缓存")
                 return self.cached_videos
+
+            # 没有任何缓存，给出详细帮助
+            self.logger.error("="*50)
+            self.logger.error("获取视频列表失败，请检查以下配置：")
+            self.logger.error("1. uid：是否在配置文件中正确设置？")
+            self.logger.error("2. cookie：是否在配置文件中正确设置？")
+            self.logger.error("3. 如果使用老版本升级，请复制 config.example.toml 为 config.toml")
+            self.logger.error("="*50)
             return []
     
     def decompress_response(self, response) -> str:

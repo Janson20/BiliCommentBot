@@ -1,478 +1,307 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-B站评论自动回复机器人
-使用DeepSeek API自动回复B站视频的新增评论
-本项目基于 MIT 协议开源。
+B站评论自动回复机器人 - Web UI 版
+启动后自动打开浏览器，所有功能通过 Web 界面操作
 """
 
 import os
+import sys
 import time
 import json
 import logging
+import threading
+import webbrowser
+import hashlib
+import urllib.parse
+import re
+import random
+import gzip
+import zlib
+import base64
+import io
+from datetime import datetime
+from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass, asdict
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import toml
-import random
-import hashlib
-import urllib.parse
-from datetime import datetime
-from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass
+import tomli_w
+
+from flask import Flask, request, jsonify, render_template_string
+from flask_socketio import SocketIO, emit
+
+# ─────────────────────────────────────────────
+#  全局常量
+# ─────────────────────────────────────────────
+CONFIG_FILE = "config.toml"
+HISTORY_FILE = "history.json"
+COOKIE_FILE = "bilibili_cookie.json"
+VIDEO_CACHE_FILE = "video_cache.json"
+
+DEFAULT_CONFIG = {
+    "bilibili": {
+        "cookie": "",
+        "refresh_token": "",
+        "uid": "",
+        "check_interval": 60,
+        "auto_refresh_cookie": True,
+        "cookie_refresh_interval": 30,
+        "max_comment_pages": 10,
+        "max_video_pages": 10,
+    },
+    "rate_limit": {
+        "min_request_interval": 2.0,
+        "max_retries": 3,
+        "retry_delay": 5,
+    },
+    "cache": {
+        "expire_time": 300,
+        "enabled": True,
+    },
+    "video_cache": {
+        "expire_time": 43200,
+        "cache_file": "video_cache.json",
+    },
+    "deepseek": {
+        "api_key": "",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "max_tokens": 200,
+        "temperature": 0.7,
+        "system_prompt": "你是一个友善的B站UP主，请对评论做出自然、友好的回复。回复要简洁明了，控制在100字以内。",
+    },
+    "reply": {
+        "enabled": True,
+        "prefix": "",
+        "only_new": True,
+        "max_process": 10,
+        "reply_delay": 2,
+        "like_enabled": False,
+        "context_comments_count": 0,
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "logs/bot.log",
+        "console": True,
+    },
+}
+
+# ─────────────────────────────────────────────
+#  Flask + SocketIO
+# ─────────────────────────────────────────────
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "bilibot-secret-2024"
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+# ─────────────────────────────────────────────
+#  日志 Handler（推送到前端）
+# ─────────────────────────────────────────────
+class WebSocketLogHandler(logging.Handler):
+    def __init__(self, sio: SocketIO):
+        super().__init__()
+        self.sio = sio
+        self.log_buffer: List[dict] = []
+        self.max_buffer = 500
+
+    def emit(self, record: logging.LogRecord):
+        entry = {
+            "time": datetime.fromtimestamp(record.created).strftime("%H:%M:%S"),
+            "level": record.levelname,
+            "msg": self.format(record),
+        }
+        self.log_buffer.append(entry)
+        if len(self.log_buffer) > self.max_buffer:
+            self.log_buffer = self.log_buffer[-self.max_buffer:]
+        try:
+            self.sio.emit("log", entry)
+        except Exception:
+            pass
 
 
+ws_log_handler = WebSocketLogHandler(socketio)
+ws_log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
+
+# ─────────────────────────────────────────────
+#  配置管理
+# ─────────────────────────────────────────────
+def load_config() -> dict:
+    if not os.path.exists(CONFIG_FILE):
+        return json.loads(json.dumps(DEFAULT_CONFIG))
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = toml.load(f)
+        # 深度合并默认值
+        def merge(base, override):
+            result = dict(base)
+            for k, v in override.items():
+                if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+                    result[k] = merge(result[k], v)
+                else:
+                    result[k] = v
+            return result
+        return merge(DEFAULT_CONFIG, cfg)
+    except Exception as e:
+        return json.loads(json.dumps(DEFAULT_CONFIG))
+
+
+def save_config(cfg: dict) -> bool:
+    try:
+        with open(CONFIG_FILE, "wb") as f:
+            tomli_w.dump(cfg, f)
+        return True
+    except Exception as e:
+        return False
+
+
+# ─────────────────────────────────────────────
+#  B站Cookie管理器
+# ─────────────────────────────────────────────
 class BilibiliCookieManager:
-    """
-    B站Cookie管理器
-    实现Cookie的自动刷新功能
-    """
-
     def __init__(self, cookie_str: str = None, refresh_token: str = None, logger=None):
-        """
-        初始化Cookie管理器
-
-        Args:
-            cookie_str: Cookie字符串，格式为"SESSDATA=xxx; bili_jct=xxx; ..."
-            refresh_token: 刷新令牌，可从登录响应中获取
-            logger: 日志记录器实例
-        """
-        self.logger = logger  # 初始化logger
+        self.logger = logger or logging.getLogger("BiliBot")
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://www.bilibili.com/',
-            'Origin': 'https://www.bilibili.com',
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://www.bilibili.com/",
+            "Origin": "https://www.bilibili.com",
         })
-        # 配置连接池
         adapter = HTTPAdapter(pool_connections=5, pool_maxsize=10)
-        self.session.mount('http://', adapter)
-        self.session.mount('https://', adapter)
-
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
         if cookie_str:
             self.set_cookie_from_str(cookie_str)
-
         self.refresh_token = refresh_token
         self.csrf_token = self._get_csrf_from_cookie()
 
     def set_cookie_from_str(self, cookie_str: str):
-        """从字符串设置Cookie"""
         cookie_dict = {}
-        for item in cookie_str.split(';'):
+        for item in cookie_str.split(";"):
             item = item.strip()
             if not item:
                 continue
-            if '=' in item:
-                key, value = item.split('=', 1)
+            if "=" in item:
+                key, value = item.split("=", 1)
                 cookie_dict[key.strip()] = value.strip()
-            else:
-                cookie_dict[item] = ''
         self.session.cookies.update(cookie_dict)
 
     def _get_csrf_from_cookie(self) -> Optional[str]:
-        """从Cookie中获取CSRF Token (bili_jct)"""
-        return self.session.cookies.get('bili_jct', None)
+        return self.session.cookies.get("bili_jct", None)
 
-    def _generate_correspond_path(self) -> str:
-        """生成加密的correspondPath参数"""
-        timestamp = int(time.time())
-        md5 = hashlib.md5(f'{timestamp}'.encode()).hexdigest()
-        correspond_path = f'/apis/redirect/login?from=bilibili.com&timestamp={timestamp}&md5={md5}'
-        return correspond_path
-
-    def check_cookie_status(self) -> Dict:
-        """
-        检查Cookie状态
-
-        Returns:
-            Dict: 状态信息，包含是否需要刷新
-        """
-        url = 'https://passport.bilibili.com/x/passport-login/web/cookie/info'
-
+    def check_cookie_status(self) -> dict:
+        url = "https://passport.bilibili.com/x/passport-login/web/cookie/info"
         try:
-            response = self.session.get(url)
-            response.raise_for_status()
+            response = self.session.get(url, timeout=10)
             data = response.json()
-
-            if data.get('code') == 0:
-                return {
-                    'need_refresh': data.get('data', {}).get('refresh', False),
-                    'message': 'Cookie状态检查成功',
-                    'data': data.get('data', {})
-                }
-            else:
-                return {
-                    'need_refresh': False,
-                    'message': f'检查失败: {data.get("message", "未知错误")}',
-                    'code': data.get('code')
-                }
-
+            if data.get("code") == 0:
+                return {"need_refresh": data.get("data", {}).get("refresh", False), "message": "OK"}
+            return {"need_refresh": False, "message": data.get("message", "未知错误")}
         except Exception as e:
-            return {
-                'need_refresh': False,
-                'message': f'请求异常: {str(e)}',
-                'error': str(e)
-            }
+            return {"need_refresh": False, "message": str(e)}
 
     def get_refresh_csrf(self) -> Optional[str]:
-        """
-        获取刷新所需的CSRF令牌
-
-        Returns:
-            str: refresh_csrf 令牌
-        """
-        correspond_path = self._generate_correspond_path()
-        encoded_path = urllib.parse.quote(correspond_path, safe='')
-
-        url = f'https://www.bilibili.com/correspond/1/{encoded_path}'
-
-        self.logger.info(f"获取refresh_csrf，访问URL: {url}")
-
+        timestamp = int(time.time())
+        md5 = hashlib.md5(f"{timestamp}".encode()).hexdigest()
+        correspond_path = f"/apis/redirect/login?from=bilibili.com&timestamp={timestamp}&md5={md5}"
+        encoded_path = urllib.parse.quote(correspond_path, safe="")
+        url = f"https://www.bilibili.com/correspond/1/{encoded_path}"
         try:
-            # 模拟浏览器访问
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            }
-            response = self.session.get(url, headers=headers)
-            response.raise_for_status()
-
-            # 从返回的HTML中提取refresh_csrf
+            response = self.session.get(url, timeout=15)
             html_content = response.text
-
-            self.logger.debug(f"获取refresh_csrf响应长度: {len(html_content)}")
-
-            import re
-
-            # 尝试多种模式匹配
             patterns = [
                 r'"refresh_csrf"\s*:\s*"([^"]+)"',
-                r'"refresh_csrf"\s*:\s*"((?:[^"\\]|\\.)*)"',
                 r"refresh_csrf\s*=\s*'([^']+)'",
                 r"refresh_csrf\s*=\s*\"([^\"]+)\"",
-                r"refresh_csrf['\"]?\s*[:=]\s*['\"]?([0-9a-zA-Z_-]+)['\"]?",
-                r'window\.__refresh_csrf\s*=\s*["\']([^"\']+)["\']',
-                r'csrf["\']\s*:\s*["\']([^"\']+)["\']',
             ]
-
             for pattern in patterns:
                 match = re.search(pattern, html_content, re.IGNORECASE)
                 if match:
-                    csrf_value = match.group(1)
-                    if csrf_value and csrf_value.strip():
-                        self.logger.info(f"成功从正则模式获取refresh_csrf: {csrf_value[:10]}...")
-                        return csrf_value.strip()
-
-            # 如果正则匹配失败，尝试从Cookie中获取（某些情况下B站会返回refresh_csrf到Cookie）
-            refresh_csrf_cookie = self.session.cookies.get('refresh_csrf')
-            if refresh_csrf_cookie:
-                self.logger.info(f"从Cookie中获取refresh_csrf: {refresh_csrf_cookie[:10]}...")
-                return refresh_csrf_cookie
-
-            # 输出部分HTML用于调试
-            lines_with_keyword = [line for line in html_content.split('\n') if 'refresh' in line.lower() or 'csrf' in line.lower()]
-            if lines_with_keyword:
-                self.logger.warning(f"找到包含refresh/csrf的行: {lines_with_keyword[:5]}")
-            else:
-                self.logger.warning(f"HTML中未找到refresh_csrf，响应前500字符: {html_content[:500]}")
-
-            return None
-
+                    return match.group(1).strip()
+            return self.session.cookies.get("refresh_csrf")
         except Exception as e:
-            self.logger.error(f"获取refresh_csrf异常: {str(e)}")
+            self.logger.error(f"获取refresh_csrf异常: {e}")
             return None
 
-    def refresh_cookie(self, refresh_token: str = None) -> Tuple[bool, Dict]:
-        """
-        刷新Cookie
-
-        Args:
-            refresh_token: 刷新令牌，如果为None则使用初始化时设置的
-
-        Returns:
-            Tuple[bool, Dict]: (是否成功, 响应信息)
-        """
-        self.logger.info("="*30)
-        self.logger.info("开始刷新Cookie")
-        self.logger.info("="*30)
-
-        if not refresh_token and not self.refresh_token:
-            self.logger.error("refresh_token不存在，无法刷新Cookie")
-            return False, {'message': 'refresh_token不存在'}
-
+    def refresh_cookie(self, refresh_token: str = None) -> Tuple[bool, dict]:
         token = refresh_token or self.refresh_token
-        self.logger.info(f"refresh_token: {token[:20] if token else 'None'}...")
-
-        # 获取refresh_csrf
+        if not token:
+            return False, {"message": "refresh_token不存在"}
         refresh_csrf = self.get_refresh_csrf()
         if not refresh_csrf:
-            self.logger.error("获取refresh_csrf失败，请检查网络连接或Cookie是否有效")
-            return False, {'message': '获取refresh_csrf失败'}
-
-        self.logger.info(f"获取refresh_csrf成功: {refresh_csrf[:10] if refresh_csrf else 'None'}...")
-
-        # 获取CSRF token
+            return False, {"message": "获取refresh_csrf失败"}
         csrf_token = self._get_csrf_from_cookie()
         if not csrf_token:
-            self.logger.error("从Cookie中获取CSRF token失败")
-            return False, {'message': '从Cookie中获取CSRF token失败'}
-        self.logger.info(f"CSRF token: {csrf_token[:10] if csrf_token else 'None'}...")
-
-        # 刷新Cookie
-        url = 'https://passport.bilibili.com/x/passport-login/web/cookie/refresh'
-        self.logger.info(f"刷新Cookie API: {url}")
-
-        # 模拟浏览器请求
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://www.bilibili.com/',
-            'Origin': 'https://www.bilibili.com',
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        }
-
-        params = {
-            'csrf': csrf_token,
-            'refresh_csrf': refresh_csrf,
-            'refresh_token': token,
-            'source': 'main_web'
-        }
-
+            return False, {"message": "获取CSRF token失败"}
+        url = "https://passport.bilibili.com/x/passport-login/web/cookie/refresh"
+        params = {"csrf": csrf_token, "refresh_csrf": refresh_csrf, "refresh_token": token, "source": "main_web"}
         try:
-            self.logger.info(f"发送刷新Cookie请求...")
-            response = self.session.post(url, data=params, headers=headers)
-            self.logger.info(f"响应状态码: {response.status_code}")
-
-            # 记录响应内容用于调试
-            try:
-                data = response.json()
-                self.logger.info(f"刷新Cookie响应: code={data.get('code')}, message={data.get('message')}")
-
-                # 打印完整响应数据用于调试
-                if data.get('code') != 0:
-                    self.logger.warning(f"刷新失败，完整响应: {data}")
-
-            except json.JSONDecodeError:
-                self.logger.error(f"响应不是JSON格式: {response.text[:500]}")
-                return False, {'message': '响应解析失败'}
-
-            if data.get('code') == 0:
-                response_data = data.get('data', {})
-                self.logger.info(f"刷新Cookie响应数据: {response_data}")
-
-                # 更新refresh_token
-                new_refresh_token = response_data.get('refresh_token')
+            response = self.session.post(url, data=params, timeout=15)
+            data = response.json()
+            if data.get("code") == 0:
+                response_data = data.get("data", {})
+                new_refresh_token = response_data.get("refresh_token")
                 if new_refresh_token:
                     self.refresh_token = new_refresh_token
-                    self.logger.info(f"更新refresh_token成功")
-
-                # 尝试确认刷新，使旧的refresh_token失效
-                # 如果confirm_refresh失败，继续尝试获取新Cookie
-                confirm_success = False
-                if new_refresh_token:
-                    confirm_success = self.confirm_refresh(new_refresh_token)
-                    if confirm_success:
-                        self.logger.info("确认刷新成功")
-                    else:
-                        self.logger.warning("确认刷新失败，但继续尝试更新Cookie")
-
-                # 刷新成功后，需要从响应中获取新的 Cookie
-                # response.cookies 包含服务器返回的新 Cookie（如 set-cookie 头部）
-                if hasattr(response, 'cookies') and response.cookies:
-                    for cookie_name, cookie_value in response.cookies.items():
-                        self.session.cookies.set(cookie_name, cookie_value)
-                        self.logger.info(f"从响应更新Cookie: {cookie_name}")
-
-                # 验证关键 Cookie 是否存在
-                sessdata = self.session.cookies.get('SESSDATA')
-                bili_jct = self.session.cookies.get('bili_jct')
-                if not sessdata or not bili_jct:
-                    self.logger.warning(f"刷新后关键 Cookie 缺失: SESSDATA={bool(sessdata)}, bili_jct={bool(bili_jct)}")
-                else:
-                    self.logger.info("刷新后关键 Cookie 存在")
-
-                self.logger.info("="*30)
-                self.logger.info("Cookie刷新完成")
-                self.logger.info("="*30)
-
-                return True, {
-                    'message': 'Cookie刷新成功',
-                    'data': response_data,
-                    'new_refresh_token': new_refresh_token,
-                    'cookies': dict(self.session.cookies)
-                }
-            else:
-                error_msg = data.get('message', '未知错误')
-                error_code = data.get('code')
-                self.logger.error(f"刷新失败: code={error_code}, message={error_msg}")
-
-                # 如果是-509错误（请求过于频繁），给出更明确的提示
-                if error_code == -509:
-                    self.logger.error("请求过于频繁，请稍后再试")
-
-                return False, {
-                    'message': f'刷新失败: {error_msg}',
-                    'code': error_code
-                }
-
+                if response.cookies:
+                    for k, v in response.cookies.items():
+                        self.session.cookies.set(k, v)
+                self.csrf_token = self._get_csrf_from_cookie()
+                return True, {"message": "刷新成功", "new_refresh_token": new_refresh_token, "cookies": dict(self.session.cookies)}
+            return False, {"message": data.get("message", "刷新失败")}
         except Exception as e:
-            return False, {
-                'message': f'刷新请求异常: {str(e)}',
-                'error': str(e)
-            }
+            return False, {"message": str(e)}
 
-    def confirm_refresh(self, new_refresh_token: str) -> bool:
-        """
-        确认刷新，使旧的refresh_token失效
-
-        Args:
-            new_refresh_token: 新的刷新令牌
-
-        Returns:
-            bool: 是否成功
-        """
-        self.logger.info("开始确认Cookie刷新...")
-
-        csrf_token = self._get_csrf_from_cookie()
-        if not csrf_token:
-            self.logger.error("确认刷新失败：无法获取CSRF token")
-            return False
-
-        url = 'https://passport.bilibili.com/x/passport-login/web/confirm/refresh'
-        self.logger.info(f"确认刷新API: {url}")
-
-        # 模拟浏览器请求
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://www.bilibili.com/',
-            'Origin': 'https://www.bilibili.com',
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        }
-
-        params = {
-            'csrf': csrf_token,
-            'refresh_token': new_refresh_token
-        }
-
+    def verify_cookie(self) -> Tuple[bool, dict]:
+        sessdata = self.session.cookies.get("SESSDATA")
+        bili_jct = self.session.cookies.get("bili_jct")
+        if not sessdata or not bili_jct:
+            return False, {"message": "关键Cookie缺失", "code": -1}
+        url = "https://api.bilibili.com/x/space/myinfo"
         try:
-            response = self.session.post(url, data=params, headers=headers)
-            self.logger.info(f"确认刷新响应状态码: {response.status_code}")
+            response = self.session.get(url, timeout=10)
             data = response.json()
-            self.logger.info(f"确认刷新响应: code={data.get('code')}, message={data.get('message')}")
-
-            success = data.get('code') == 0
-            if success:
-                self.logger.info("确认刷新成功")
-            else:
-                self.logger.warning(f"确认刷新失败: {data.get('message')}")
-
-            return success
-
+            if data.get("code") == 0:
+                user_info = data.get("data", {})
+                return True, {"message": "Cookie有效", "user_info": {"mid": user_info.get("mid"), "name": user_info.get("name")}}
+            return False, {"message": data.get("message", "验证失败"), "code": data.get("code")}
         except Exception as e:
-            self.logger.error(f"确认刷新异常: {str(e)}")
-            return False
+            return False, {"message": str(e), "code": -999}
+
+    def auto_refresh_if_needed(self) -> Tuple[bool, dict]:
+        status = self.check_cookie_status()
+        if status.get("need_refresh"):
+            success, result = self.refresh_cookie()
+            return True, {"success": success, **result}
+        return False, {"message": "Cookie状态正常"}
 
     def get_cookie_str(self) -> str:
-        """获取当前Cookie字符串"""
-        return '; '.join([f'{k}={v}' for k, v in self.session.cookies.items()])
+        return "; ".join(f"{k}={v}" for k, v in self.session.cookies.items())
 
-    def save_to_file(self, filename: str = 'bilibili_cookie.json'):
-        """保存Cookie和refresh_token到文件"""
-        data = {
-            'cookie': dict(self.session.cookies),
-            'refresh_token': self.refresh_token,
-            'timestamp': time.time()
-        }
-
-        with open(filename, 'w', encoding='utf-8') as f:
+    def save_to_file(self, filename: str = COOKIE_FILE):
+        data = {"cookie": dict(self.session.cookies), "refresh_token": self.refresh_token, "timestamp": time.time()}
+        with open(filename, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def load_from_file(self, filename: str = 'bilibili_cookie.json') -> bool:
-        """从文件加载Cookie和refresh_token"""
+    def load_from_file(self, filename: str = COOKIE_FILE) -> bool:
         try:
-            with open(filename, 'r', encoding='utf-8') as f:
+            with open(filename, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
-            if 'cookie' in data:
-                for k, v in data['cookie'].items():
-                    self.session.cookies.set(k, v)
-
-            if 'refresh_token' in data:
-                self.refresh_token = data['refresh_token']
-
+            for k, v in data.get("cookie", {}).items():
+                self.session.cookies.set(k, v)
+            self.refresh_token = data.get("refresh_token", "")
             self.csrf_token = self._get_csrf_from_cookie()
             return True
-
-        except Exception as e:
+        except Exception:
             return False
 
-    def verify_cookie(self) -> Tuple[bool, Dict]:
-        """
-        验证当前Cookie是否有效（是否处于登录状态）
 
-        Returns:
-            Tuple[bool, Dict]: (是否有效, 状态信息)
-        """
-        # 检查关键Cookie是否存在
-        sessdata = self.session.cookies.get('SESSDATA')
-        bili_jct = self.session.cookies.get('bili_jct')
-        self.logger.debug(f"验证Cookie: SESSDATA存在={bool(sessdata)}, bili_jct存在={bool(bili_jct)}")
-        if not sessdata or not bili_jct:
-            self.logger.warning("关键Cookie缺失: SESSDATA或bili_jct")
-            return False, {'message': '关键Cookie缺失 (SESSDATA或bili_jct)'}
-
-        # 调用B站API验证登录状态
-        url = 'https://api.bilibili.com/x/space/myinfo'
-        self.logger.debug(f"验证登录状态, API: {url}")
-
-        try:
-            response = self.session.get(url)
-            response.raise_for_status()
-            data = response.json()
-            self.logger.debug(f"验证登录状态响应: code={data.get('code')}")
-
-            if data.get('code') == 0:
-                user_info = data.get('data', {})
-                self.logger.info(f"Cookie验证成功, 用户: {user_info.get('name')}, mid: {user_info.get('mid')}")
-                return True, {
-                    'message': 'Cookie有效，已登录',
-                    'user_info': {
-                        'mid': user_info.get('mid'),
-                        'name': user_info.get('name')
-                    }
-                }
-            else:
-                self.logger.warning(f"Cookie验证失败: code={data.get('code')}, message={data.get('message')}")
-                return False, {
-                    'message': f'Cookie验证失败: {data.get("message", "未知错误")}',
-                    'code': data.get('code')
-                }
-        except Exception as e:
-            self.logger.error(f"验证Cookie请求异常: {str(e)}", exc_info=True)
-            return False, {'message': f'验证请求异常: {str(e)}', 'error': str(e)}
-
-    def auto_refresh_if_needed(self) -> Tuple[bool, Dict]:
-        """
-        自动检查并刷新Cookie（如果需要）
-
-        Returns:
-            Tuple[bool, Dict]: (是否需要刷新, 刷新结果)
-        """
-        # 检查Cookie状态
-        status = self.check_cookie_status()
-
-        if status.get('need_refresh'):
-            return True, self.refresh_cookie()
-        else:
-            if status.get('code') == -101:  # 未登录
-                return False, {'message': 'Cookie已过期，需要重新登录'}
-            else:
-                return False, {'message': 'Cookie状态正常，无需刷新'}
-
-
+# ─────────────────────────────────────────────
+#  评论数据类
+# ─────────────────────────────────────────────
 @dataclass
 class Comment:
-    """评论数据类"""
     comment_id: str
     content: str
     user: str
@@ -481,1220 +310,1726 @@ class Comment:
     replied: bool = False
 
 
+# ─────────────────────────────────────────────
+#  机器人核心
+# ─────────────────────────────────────────────
 class BiliCommentBot:
-    """B站评论自动回复机器人"""
-    
-    def __init__(self, config_path: str = "config.toml"):
-        """初始化机器人"""
-        self.config = self.load_config(config_path)
-        self.setup_logging()
-        self.logger.info("="*50)
-        self.logger.info("B站评论自动回复机器人初始化开始")
-        self.logger.info(f"配置文件: {config_path}")
+    def __init__(self, config: dict, logger: logging.Logger):
+        self.config = config
+        self.logger = logger
         self.session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=Retry(total=0))
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
-        # 配置连接池和重试策略
-        adapter = HTTPAdapter(
-            pool_connections=10,
-            pool_maxsize=20,
-            max_retries=Retry(total=0)  # 禁用默认重试，使用自定义重试逻辑
-        )
-        self.session.mount('http://', adapter)
-        self.session.mount('https://', adapter)
-
-        # 初始化请求头池
         self.user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15'
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/91.0.4472.124 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/92.0.4515.107 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/91.0.4472.124 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
         ]
-
         self.referers = [
-            'https://www.bilibili.com/',
-            'https://search.bilibili.com/',
-            'https://t.bilibili.com/',
-            'https://space.bilibili.com/'
+            "https://www.bilibili.com/",
+            "https://search.bilibili.com/",
+            "https://space.bilibili.com/",
         ]
-
         self.update_headers()
 
-        # 初始化Cookie管理器
-        self.cookie_manager = None
+        # Cookie管理器
+        self.cookie_manager: Optional[BilibiliCookieManager] = None
+        self.csrf_token: Optional[str] = None
         self.last_cookie_refresh_time = 0
-        self.cookie_refresh_interval = self.config['bilibili'].get('cookie_refresh_interval', 30) * 60  # 转换为秒
-        self.auto_refresh_cookie = self.config['bilibili'].get('auto_refresh_cookie', True)
+        self.cookie_refresh_interval = self.config["bilibili"].get("cookie_refresh_interval", 30) * 60
+        self.auto_refresh_cookie = self.config["bilibili"].get("auto_refresh_cookie", True)
+        self._init_cookie()
 
-        if self.config['bilibili']['cookie']:
-            # 优先从配置文件加载Cookie
-            cookie_str = self.config['bilibili']['cookie']
-            refresh_token = self.config['bilibili'].get('refresh_token', '')
-            self.cookie_manager = BilibiliCookieManager(cookie_str, refresh_token, logger=self.logger)
-            self.session.cookies.update(self.cookie_manager.session.cookies)
-            self.logger.info("从配置文件加载Cookie成功")
-
-            # 尝试从文件加载refresh_token（如果配置文件中没有的话）
-            if not refresh_token:
-                if self.cookie_manager.load_from_file('bilibili_cookie.json'):
-                    self.logger.info("从文件加载refresh_token成功")
-                    self.session.cookies.update(self.cookie_manager.session.cookies)
-        elif os.path.exists('bilibili_cookie.json'):
-            # 配置文件没有cookie时，尝试从文件加载（兼容旧版本）
-            self.cookie_manager = BilibiliCookieManager(logger=self.logger)
-            if self.cookie_manager.load_from_file('bilibili_cookie.json'):
-                self.logger.info("从文件加载Cookie成功")
-                self.session.cookies.update(self.cookie_manager.session.cookies)
-
-        # 提取CSRF token
-        if self.cookie_manager:
-            self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
-            self.logger.debug(f"CSRF Token提取成功: {self.csrf_token[:10] if self.csrf_token else 'None'}...")
-
-            # 如果启用了自动刷新，启动时检查一次
-            if self.auto_refresh_cookie and self.cookie_manager.refresh_token:
-                self.logger.info("启动时检查Cookie状态...")
-                self.refresh_cookie_if_needed()
-            else:
-                self.logger.info(f"自动刷新Cookie: {self.auto_refresh_cookie}, refresh_token存在: {bool(self.cookie_manager.refresh_token)}")
-
-            # 验证登录状态
-            self.logger.info("验证登录状态...")
-            is_valid, verify_result = self.cookie_manager.verify_cookie()
-            if is_valid:
-                user_info = verify_result.get('user_info', {})
-                self.logger.info(f"登录状态验证成功，当前用户: {user_info.get('name', 'N/A')} (mid: {user_info.get('mid', 'N/A')})")
-            else:
-                self.logger.error(f"登录状态验证失败: {verify_result.get('message')}, code: {verify_result.get('code')}")
-                if verify_result.get('code') == -101:
-                    self.logger.error("错误: 账号未登录或Cookie已过期，请重新获取Cookie")
-        else:
-            self.csrf_token = None
-            self.logger.warning("未初始化Cookie管理器")
-
-        self.processed_comments = set()
-        self.history_file = "history.json"
+        # 历史 & 缓存
+        self.processed_comments: set = set()
         self.load_history()
+        self.cache: dict = {}
+        self.cache_expire_time = self.config.get("cache", {}).get("expire_time", 300)
 
-        # 请求频率控制
+        # 频率控制
         self.last_request_time = 0
-        rate_limit_config = self.config.get('rate_limit', {})
-        self.min_request_interval = rate_limit_config.get('min_request_interval', 2.0)
-        self.max_retries = rate_limit_config.get('max_retries', 3)
-        self.retry_delay = rate_limit_config.get('retry_delay', 5)
-
-        # 缓存配置
-        self.cache = {}
-        self.cache_expire_time = 300  # 5分钟缓存过期时间
-
-        # 动态间隔控制
+        rl = self.config.get("rate_limit", {})
+        self.min_request_interval = rl.get("min_request_interval", 2.0)
+        self.max_retries = rl.get("max_retries", 3)
+        self.retry_delay = rl.get("retry_delay", 5)
         self.consecutive_failures = 0
         self.adaptive_interval = self.min_request_interval
 
-        # 视频列表缓存配置（12小时）
-        video_cache_config = self.config.get('video_cache', {})
-        self.cached_videos = []
+        # 视频缓存
+        vc = self.config.get("video_cache", {})
+        self.cached_videos: List[dict] = []
         self.last_video_fetch_time = 0
-        self.video_cache_file = video_cache_config.get('cache_file', 'video_cache.json')
-        self.video_cache_expire_time = video_cache_config.get('expire_time', 43200)  # 默认12小时
+        self.video_cache_file = vc.get("cache_file", VIDEO_CACHE_FILE)
+        self.video_cache_expire_time = vc.get("expire_time", 43200)
         self.load_video_cache()
 
-        self.logger.info("B站评论自动回复机器人启动")
+        # 运行状态
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
 
-    def __enter__(self):
-        """支持上下文管理器"""
-        return self
+        # 统计
+        self.stats = {"total_replied": 0, "start_time": None, "last_check": None}
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """退出时保存状态"""
+    def _init_cookie(self):
+        cookie_str = self.config["bilibili"].get("cookie", "")
+        refresh_token = self.config["bilibili"].get("refresh_token", "")
+        if cookie_str:
+            self.cookie_manager = BilibiliCookieManager(cookie_str, refresh_token, logger=self.logger)
+            self.session.cookies.update(self.cookie_manager.session.cookies)
+        elif os.path.exists(COOKIE_FILE):
+            self.cookie_manager = BilibiliCookieManager(logger=self.logger)
+            if self.cookie_manager.load_from_file(COOKIE_FILE):
+                self.session.cookies.update(self.cookie_manager.session.cookies)
+        if self.cookie_manager:
+            self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
+
+    def reload_config(self, config: dict):
+        """热更新配置"""
+        self.config = config
+        self.cookie_refresh_interval = config["bilibili"].get("cookie_refresh_interval", 30) * 60
+        self.auto_refresh_cookie = config["bilibili"].get("auto_refresh_cookie", True)
+        rl = config.get("rate_limit", {})
+        self.min_request_interval = rl.get("min_request_interval", 2.0)
+        self.max_retries = rl.get("max_retries", 3)
+        self.retry_delay = rl.get("retry_delay", 5)
+        self.adaptive_interval = self.min_request_interval
+        vc = config.get("video_cache", {})
+        self.video_cache_expire_time = vc.get("expire_time", 43200)
+        # 重新初始化Cookie
+        self._init_cookie()
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    def start(self):
+        if self._running:
+            return False
+        self._running = True
+        self.stats["start_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        self.logger.info("机器人已启动")
+        socketio.emit("bot_status", {"running": True})
+        return True
+
+    def stop(self):
+        if not self._running:
+            return False
+        self._running = False
+        self.logger.info("机器人已停止")
+        socketio.emit("bot_status", {"running": False})
+        # 保存Cookie
         if self.cookie_manager:
             try:
-                self.cookie_manager.save_to_file('bilibili_cookie.json')
-                self.logger.info("Cookie状态已保存")
-            except Exception as e:
-                self.logger.error(f"保存Cookie失败: {e}")
-        self.session.close()
-        # 忽略异常，让其传播
-        return False
+                self.cookie_manager.save_to_file(COOKIE_FILE)
+            except Exception:
+                pass
+        return True
 
-    def extract_csrf_token(self, cookie: str) -> Optional[str]:
-        """从Cookie中提取CSRF token (bili_jct)"""
-        import re
-        match = re.search(r'bili_jct=([^;]+)', cookie)
-        if match:
-            return match.group(1)
-        else:
-            self.logger.warning("未在Cookie中找到bili_jct (CSRF token)")
-            return None
-    
-    def load_history(self):
-        """加载历史记录"""
-        try:
-            if os.path.exists(self.history_file):
-                with open(self.history_file, 'r', encoding='utf-8') as f:
-                    history = json.load(f)
-                    # 从历史记录中恢复已处理的评论ID
-                    self.processed_comments = set(item.get('comment_id') for item in history)
-                    self.logger.info(f"加载历史记录，已处理 {len(self.processed_comments)} 条评论")
-            else:
-                self.logger.info("未找到历史记录文件，将创建新的历史记录")
-        except Exception as e:
-            self.logger.error(f"加载历史记录失败: {e}")
-            self.processed_comments = set()
-    
-    def save_history(self, comment: Comment, reply_content: str):
-        """保存回复历史"""
-        try:
-            history_item = {
-                'comment_id': comment.comment_id,
-                'content': comment.content,
-                'user': comment.user,
-                'uid': comment.uid,
-                'time': comment.time,
-                'reply_time': int(time.time()),
-                'reply_content': reply_content,
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            }
-            
-            # 读取现有历史记录
-            history = []
-            if os.path.exists(self.history_file):
-                try:
-                    with open(self.history_file, 'r', encoding='utf-8') as f:
-                        history = json.load(f)
-                except:
-                    history = []
-            
-            # 添加新记录
-            history.append(history_item)
-            
-            # 保存到文件
-            with open(self.history_file, 'w', encoding='utf-8') as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
-            
-            self.logger.info(f"保存回复历史: {comment.comment_id}")
-        except Exception as e:
-            self.logger.error(f"保存历史记录失败: {e}")
-    
-    def load_video_cache(self):
-        """加载视频列表缓存"""
-        try:
-            if os.path.exists(self.video_cache_file):
-                with open(self.video_cache_file, 'r', encoding='utf-8') as f:
-                    cache_data = json.load(f)
-                    self.cached_videos = cache_data.get('videos', [])
-                    self.last_video_fetch_time = cache_data.get('fetch_time', 0)
-                    
-                    cache_age = (time.time() - self.last_video_fetch_time) / 3600  # 转换为小时
-                    self.logger.info(f"加载视频缓存，缓存{cache_age:.1f}小时，共{len(self.cached_videos)}个视频")
-            else:
-                self.logger.info("未找到视频缓存文件")
-        except Exception as e:
-            self.logger.error(f"加载视频缓存失败: {e}")
-            self.cached_videos = []
-            self.last_video_fetch_time = 0
-    
-    def save_video_cache(self, videos: List[Dict]):
-        """保存视频列表缓存"""
-        try:
-            cache_data = {
-                'videos': videos,
-                'fetch_time': int(time.time()),
-                'fetch_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            }
-            
-            with open(self.video_cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
-            
-            self.logger.info(f"保存视频缓存，共{len(videos)}个视频")
-        except Exception as e:
-            self.logger.error(f"保存视频缓存失败: {e}")
-    
+    def _run_loop(self):
+        while self._running:
+            self.stats["last_check"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                self.process_comments()
+            except Exception as e:
+                self.logger.error(f"处理评论异常: {e}", exc_info=True)
+            socketio.emit("stats", self.get_stats())
+            interval = self.config["bilibili"].get("check_interval", 60)
+            self.logger.info(f"等待 {interval} 秒后进行下次检查")
+            # 分段sleep，方便快速响应停止
+            for _ in range(interval * 10):
+                if not self._running:
+                    break
+                time.sleep(0.1)
+
     def update_headers(self):
-        """更新请求头，随机化特征"""
         self.session.headers.update({
-            'User-Agent': random.choice(self.user_agents),
-            'Referer': random.choice(self.referers),
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            # 不设置Accept-Encoding，让requests库自动处理解压
-            # 'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-site'
+            "User-Agent": random.choice(self.user_agents),
+            "Referer": random.choice(self.referers),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Connection": "keep-alive",
         })
-    
+
     def get_cache_key(self, url: str, params: dict = None) -> str:
-        """生成缓存键"""
-        import hashlib
         cache_data = f"{url}_{str(sorted(params.items()) if params else '')}"
         return hashlib.md5(cache_data.encode()).hexdigest()
-    
-    def get_from_cache(self, cache_key: str) -> Optional[dict]:
-        """从缓存获取数据"""
-        if cache_key in self.cache:
-            data, timestamp = self.cache[cache_key]
-            if time.time() - timestamp < self.cache_expire_time:
-                self.logger.debug(f"使用缓存数据: {cache_key}")
+
+    def get_from_cache(self, key: str) -> Optional[dict]:
+        if key in self.cache:
+            data, ts = self.cache[key]
+            if time.time() - ts < self.cache_expire_time:
                 return data
-            else:
-                del self.cache[cache_key]
+            del self.cache[key]
         return None
-    
-    def set_cache(self, cache_key: str, data: dict):
-        """设置缓存"""
-        self.cache[cache_key] = (data, time.time())
-    
+
+    def set_cache(self, key: str, data: dict):
+        self.cache[key] = (data, time.time())
+
     def rate_limit_request(self):
-        """动态请求频率限制"""
         current_time = time.time()
-        time_since_last_request = current_time - self.last_request_time
-        
-        # 根据连续失败次数调整间隔
+        elapsed = current_time - self.last_request_time
         if self.consecutive_failures > 0:
-            self.adaptive_interval = min(
-                self.min_request_interval * (1 + self.consecutive_failures * 0.5),
-                self.min_request_interval * 5
-            )
+            self.adaptive_interval = min(self.min_request_interval * (1 + self.consecutive_failures * 0.5), self.min_request_interval * 5)
         else:
             self.adaptive_interval = self.min_request_interval
-        
-        if time_since_last_request < self.adaptive_interval:
-            sleep_time = self.adaptive_interval - time_since_last_request
-            # 添加随机抖动
-            jitter = random.uniform(0, 0.5)
-            total_sleep = sleep_time + jitter
-            self.logger.debug(f"动态频率限制，等待 {total_sleep:.2f} 秒 (间隔: {self.adaptive_interval:.2f}s)")
-            time.sleep(total_sleep)
-        
+        if elapsed < self.adaptive_interval:
+            sleep_time = self.adaptive_interval - elapsed + random.uniform(0, 0.5)
+            time.sleep(sleep_time)
         self.last_request_time = time.time()
-        self.update_headers()  # 每次请求前更新请求头
-    
-    def make_request_with_retry(self, method: str, url: str, use_cache: bool = True, **kwargs) -> Optional[requests.Response]:
-        """带重试机制的智能请求"""
-        self.logger.debug(f"发起请求: {method} {url}")
-        if kwargs.get('params'):
-            self.logger.debug(f"请求参数: {kwargs['params']}")
-        if kwargs.get('data'):
-            self.logger.debug(f"POST数据: {kwargs['data']}")
+        self.update_headers()
 
-        # 检查缓存（仅对GET请求）
-        if use_cache and method.upper() == 'GET':
-            cache_key = self.get_cache_key(url, kwargs.get('params'))
-            cached_data = self.get_from_cache(cache_key)
-            if cached_data:
-                # 创建模拟响应对象
+    def make_request_with_retry(self, method: str, url: str, use_cache: bool = True, **kwargs) -> Optional[requests.Response]:
+        if use_cache and method.upper() == "GET":
+            cache_key = self.get_cache_key(url, kwargs.get("params"))
+            cached = self.get_from_cache(cache_key)
+            if cached:
                 class MockResponse:
-                    def __init__(self, data):
+                    def __init__(self, d):
                         self.status_code = 200
                         self.headers = {}
-                        self.text = json.dumps(data) if data else ""
-                        self._json = data
-                    
+                        self.text = json.dumps(d)
+                        self._json = d
                     def json(self):
-                        if not self._json:
-                            raise json.JSONDecodeError("Empty content", "", 0)
                         return self._json
-                
-                self.logger.debug(f"使用缓存响应: {cache_key}")
-                return MockResponse(cached_data)
-        
+                return MockResponse(cached)
+
         for attempt in range(self.max_retries):
             try:
-                # 应用动态频率限制
                 self.rate_limit_request()
-                
-                response = self.session.request(method, url, **kwargs)
-
-                # 检查响应状态
-                self.logger.debug(f"响应状态码: {response.status_code}, 内容长度: {len(response.text) if response.text else 0}")
-                if response.status_code == 429 or "请求过于频繁" in response.text:
+                response = self.session.request(method, url, timeout=15, **kwargs)
+                if response.status_code == 429:
                     self.consecutive_failures += 1
                     if attempt < self.max_retries - 1:
-                        # 智能退避：检查Retry-After头部
-                        retry_after = int(response.headers.get('Retry-After', self.retry_delay * (2 ** attempt)))
-                        # 添加随机抖动避免同步重试
-                        jitter = random.uniform(0, retry_after * 0.3)
-                        wait_time = retry_after + jitter
-                        
-                        self.logger.warning(f"请求过于频繁，{wait_time:.1f}秒后重试 (尝试 {attempt + 1}/{self.max_retries})")
-                        time.sleep(wait_time)
+                        wait = int(response.headers.get("Retry-After", self.retry_delay * (2 ** attempt))) + random.uniform(0, 3)
+                        self.logger.warning(f"请求频繁，等待 {wait:.1f}s 后重试")
+                        time.sleep(wait)
                         continue
                 elif response.status_code >= 500:
                     self.consecutive_failures += 1
                     if attempt < self.max_retries - 1:
-                        wait_time = self.retry_delay * (2 ** attempt) + random.uniform(0, 2)
-                        self.logger.warning(f"服务器错误 {response.status_code}，{wait_time:.1f}秒后重试 (尝试 {attempt + 1}/{self.max_retries})")
-                        time.sleep(wait_time)
+                        wait = self.retry_delay * (2 ** attempt) + random.uniform(0, 2)
+                        time.sleep(wait)
                         continue
                 else:
-                    self.consecutive_failures = 0  # 重置失败计数
-                
-                # 检查响应内容是否为空
+                    self.consecutive_failures = 0
                 if not response.text:
-                    self.logger.warning(f"响应内容为空，状态码: {response.status_code}")
                     if attempt < self.max_retries - 1:
-                        wait_time = self.retry_delay * (2 ** attempt) + random.uniform(0, 2)
-                        self.logger.warning(f"{wait_time:.1f}秒后重试 (尝试 {attempt + 1}/{self.max_retries})")
-                        time.sleep(wait_time)
+                        time.sleep(self.retry_delay)
                         continue
                     return None
-                
-                # 缓存成功的GET请求响应
-                if use_cache and method.upper() == 'GET' and response.status_code == 200:
+                if use_cache and method.upper() == "GET" and response.status_code == 200:
                     try:
-                        response_text = self.decompress_response(response)
-                        if response_text:
-                            data = json.loads(response_text)
-                            cache_key = self.get_cache_key(url, kwargs.get('params'))
-                            self.set_cache(cache_key, data)
-                            self.logger.debug(f"请求成功，缓存数据: {cache_key}")
-                    except:
-                        pass  # 如果不是JSON响应，忽略缓存
-
-                self.logger.debug(f"请求完成，返回响应")
+                        rt = self.decompress_response(response)
+                        if rt:
+                            data = json.loads(rt)
+                            self.set_cache(self.get_cache_key(url, kwargs.get("params")), data)
+                    except Exception:
+                        pass
                 return response
-                
             except requests.exceptions.RequestException as e:
                 self.consecutive_failures += 1
                 if attempt < self.max_retries - 1:
-                    wait_time = self.retry_delay * (2 ** attempt) + random.uniform(0, 2)
-                    self.logger.warning(f"请求异常，{wait_time:.1f}秒后重试: {e} (尝试 {attempt + 1}/{self.max_retries})")
-                    time.sleep(wait_time)
+                    time.sleep(self.retry_delay * (2 ** attempt) + random.uniform(0, 2))
                     continue
-                else:
-                    self.logger.error(f"请求失败，已达最大重试次数: {e}")
-                    return None
-        
+                self.logger.error(f"请求失败: {e}")
+                return None
         return None
-    
-    def load_config(self, config_path: str) -> dict:
-        """加载配置文件"""
-        # 检查配置文件是否存在
-        if not os.path.exists(config_path):
-            print(f"错误：配置文件 {config_path} 不存在！")
-            print("请复制 config.example.toml 为 config.toml 并填写配置")
-            print("示例：copy config.example.toml config.toml")
-            raise FileNotFoundError(f"配置文件 {config_path} 不存在")
 
+    def decompress_response(self, response) -> str:
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = toml.load(f)
+            if hasattr(response, "text") and response.text:
+                try:
+                    response.text.encode("utf-8").decode("utf-8")
+                    return response.text
+                except Exception:
+                    pass
+            content = response.content if hasattr(response, "content") else response.text
+            if not content:
+                return ""
+            if isinstance(content, bytes) and content[:2] == b"\x1f\x8b":
+                try:
+                    return gzip.decompress(content).decode("utf-8")
+                except Exception:
+                    pass
+            try:
+                return zlib.decompress(content).decode("utf-8")
+            except Exception:
+                pass
+            if isinstance(content, bytes):
+                return content.decode("utf-8", errors="ignore")
+            return str(content)
+        except Exception:
+            return getattr(response, "text", "")
 
-            # 检查必要配置项
-            errors = []
-
-            # 检查 bilibili 配置段
-            if 'bilibili' not in config:
-                errors.append("缺少 [bilibili] 配置段")
-            else:
-                if not config['bilibili'].get('uid'):
-                    errors.append("未配置 uid（B站用户ID）")
-                if not config['bilibili'].get('cookie'):
-                    errors.append("未配置 cookie（B站Cookie）")
-
-            # 检查 deepseek 配置段
-            if 'deepseek' not in config:
-                errors.append("缺少 [deepseek] 配置段")
-            else:
-                if not config['deepseek'].get('api_key'):
-                    errors.append("未配置 api_key（DeepSeek API密钥）")
-
-            if errors:
-                print("="*50)
-                print("配置检查失败，请完成以下配置：")
-                for error in errors:
-                    print(f"  - {error}")
-                print("="*50)
-                print(f"请编辑 {config_path} 文件完成配置")
-                raise Exception("配置不完整")
-
-            return config
-
-        except FileNotFoundError:
-            raise
+    def load_history(self):
+        try:
+            if os.path.exists(HISTORY_FILE):
+                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+                self.processed_comments = set(item.get("comment_id") for item in history)
+                self.logger.info(f"加载历史记录，已处理 {len(self.processed_comments)} 条评论")
         except Exception as e:
-            if "配置不完整" in str(e):
-                raise
-            print(f"错误：加载配置文件失败: {e}")
-            raise Exception(f"加载配置文件失败: {e}")
-    
-    def setup_logging(self):
-        """设置日志"""
-        log_config = self.config['logging']
-        log_level = getattr(logging, log_config['level'].upper())
-        
-        # 创建日志目录
-        log_file = log_config['file']
-        log_dir = os.path.dirname(log_file)
-        if log_dir and not os.path.exists(log_dir):
-            os.makedirs(log_dir)
-        
-        # 配置日志格式
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-        # 设置根日志器
-        self.logger = logging.getLogger('BiliCommentBot')
-        self.logger.setLevel(log_level)
-        
-        # 文件处理器
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setFormatter(formatter)
-        self.logger.addHandler(file_handler)
-        
-        # 控制台处理器
-        if log_config['console']:
-            console_handler = logging.StreamHandler()
-            console_handler.setFormatter(formatter)
-            self.logger.addHandler(console_handler)
-    
-    def get_video_list(self) -> List[Dict]:
-        """获取用户的视频列表，支持分页获取（12小时缓存）"""
-        self.logger.debug("开始获取视频列表")
+            self.logger.error(f"加载历史记录失败: {e}")
+            self.processed_comments = set()
 
-        # 检查必要配置
-        uid = self.config['bilibili'].get('uid')
+    def save_history(self, comment: Comment, reply_content: str):
+        try:
+            history = []
+            if os.path.exists(HISTORY_FILE):
+                try:
+                    with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                        history = json.load(f)
+                except Exception:
+                    history = []
+            item = {
+                "comment_id": comment.comment_id,
+                "content": comment.content,
+                "user": comment.user,
+                "uid": comment.uid,
+                "time": comment.time,
+                "reply_time": int(time.time()),
+                "reply_content": reply_content,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            history.append(item)
+            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+            # 推送到前端
+            socketio.emit("new_history", item)
+        except Exception as e:
+            self.logger.error(f"保存历史记录失败: {e}")
+
+    def load_video_cache(self):
+        try:
+            if os.path.exists(self.video_cache_file):
+                with open(self.video_cache_file, "r", encoding="utf-8") as f:
+                    cache_data = json.load(f)
+                self.cached_videos = cache_data.get("videos", [])
+                self.last_video_fetch_time = cache_data.get("fetch_time", 0)
+                age_h = (time.time() - self.last_video_fetch_time) / 3600
+                self.logger.info(f"加载视频缓存，缓存{age_h:.1f}小时，共{len(self.cached_videos)}个视频")
+        except Exception as e:
+            self.logger.error(f"加载视频缓存失败: {e}")
+            self.cached_videos = []
+
+    def save_video_cache(self, videos: List[dict]):
+        try:
+            with open(self.video_cache_file, "w", encoding="utf-8") as f:
+                json.dump({"videos": videos, "fetch_time": int(time.time()), "fetch_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.logger.error(f"保存视频缓存失败: {e}")
+
+    def get_video_list(self) -> List[dict]:
+        uid = self.config["bilibili"].get("uid")
         if not uid:
-            self.logger.error("未配置B站用户ID，请在配置文件中设置 uid")
-            self.logger.error("提示：从B站个人主页URL中获取，如 https://space.bilibili.com/123456789 中的 123456789")
+            self.logger.error("未配置uid")
             return []
-
-        cookie = self.config['bilibili'].get('cookie', '')
-        if not cookie:
-            self.logger.warning("未配置B站Cookie，可能无法获取视频列表")
-            self.logger.warning("提示：请在配置文件中设置 cookie（从浏览器开发者工具中获取）")
-
-        self.logger.info(f"获取用户视频列表, UID: {uid}")
         current_time = time.time()
-        time_since_last_fetch = current_time - self.last_video_fetch_time
-        
-        # 检查缓存是否有效
-        if self.cached_videos and time_since_last_fetch < self.video_cache_expire_time:
-            remaining_hours = (self.video_cache_expire_time - time_since_last_fetch) / 3600
-            self.logger.info(f"使用视频列表缓存，{remaining_hours:.1f}小时后过期，共{len(self.cached_videos)}个视频")
+        if self.cached_videos and (current_time - self.last_video_fetch_time) < self.video_cache_expire_time:
+            self.logger.info(f"使用视频缓存，共{len(self.cached_videos)}个")
             return self.cached_videos
-        
-        # 缓存过期或不存在，重新获取
-        self.logger.info("视频列表缓存已过期，重新获取...")
-        
-        # 从配置读取最大页数限制，默认为5页以优化性能
-        max_pn = self.config['bilibili'].get('max_video_pages', 5)
-        page_size = 20  # 每页视频数（B站API限制）
-        
+        self.logger.info("重新获取视频列表...")
+        max_pn = self.config["bilibili"].get("max_video_pages", 5)
         all_videos = []
         pn = 1
-        
-        url = f"https://api.bilibili.com/x/space/arc/search"
-        
+        url = "https://api.bilibili.com/x/space/arc/search"
         while pn <= max_pn:
-            params = {
-                'mid': uid,
-                'ps': page_size,
-                'pn': pn,
-                'order': 'pubdate'
-            }
-
-            self.logger.debug(f"请求视频列表第{pn}页, 参数: {params}")
+            params = {"mid": uid, "ps": 20, "pn": pn, "order": "pubdate"}
             try:
-                response = self.make_request_with_retry('GET', url, params=params, use_cache=False)
+                response = self.make_request_with_retry("GET", url, params=params, use_cache=False)
                 if not response:
-                    self.logger.warning(f"获取视频列表第{pn}页请求失败，停止分页")
                     break
-                
-                # 解压响应内容
-                response_text = self.decompress_response(response)
-                
-                if not response_text:
-                    self.logger.error(f"获取视频列表第{pn}页响应内容为空，停止分页")
+                rt = self.decompress_response(response)
+                if not rt:
                     break
-                
-                # 尝试解析JSON
-                try:
-                    data = json.loads(response_text)
-                except json.JSONDecodeError as e:
-                    self.logger.error(f"视频列表第{pn}页JSON解析失败: {e}")
-                    self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
-                    break
-                
-                if data.get('code') == 0:
-                    page_videos = data.get('data', {}).get('list', {}).get('vlist', [])
-
+                data = json.loads(rt)
+                if data.get("code") == 0:
+                    page_videos = data.get("data", {}).get("list", {}).get("vlist", [])
                     if not page_videos:
-                        # 没有更多视频了
-                        self.logger.info(f"视频列表第{pn}页无视频，停止分页")
                         break
-
-                    # 解析当前页的视频
-                    for video in page_videos:
-                        all_videos.append(video)
-
-                    self.logger.info(f"第{pn}页获取到 {len(page_videos)} 个视频，累计 {len(all_videos)} 个")
-                    self.logger.debug(f"视频列表第{pn}页响应: code={data.get('code')}, count={data.get('data', {}).get('page', {}).get('count', 0)}")
-                    
-                    # 检查是否还有更多页面
-                    page_info = data.get('data', {}).get('page', {})
-                    count = page_info.get('count', 0)  # 总视频数
-                    size = page_info.get('size', page_size)  # 每页大小
-                    
-                    # 如果当前页的视频数小于页面大小，说明没有更多视频了
-                    if len(page_videos) < size:
-                        self.logger.info(f"已获取所有视频，共 {len(all_videos)} 个")
+                    all_videos.extend(page_videos)
+                    self.logger.info(f"第{pn}页获取到{len(page_videos)}个视频，累计{len(all_videos)}个")
+                    if len(page_videos) < 20:
                         break
-                    
                     pn += 1
                 else:
-                    error_msg = data.get('message', '')
-                    error_code = data.get('code', '')
-                    self.logger.error(f"获取视频列表第{pn}页失败: code={error_code}, message={error_msg}")
-
-                    # 针对常见错误给出解决方案
-                    if error_code == -401:  # 需要登录
-                        self.logger.error("错误：需要登录，请检查Cookie是否正确配置")
-                    elif error_code == -403:  # 权限不足
-                        self.logger.error("错误：无权限访问，可能Cookie已过期")
-                    elif error_code == -404:  # 用户不存在
-                        self.logger.error("错误：用户不存在，请检查UID是否正确")
-                    elif error_msg and 'Unauthorized' in error_msg:
-                        self.logger.error("错误：未授权，请检查Cookie是否包含有效的SESSDATA")
-
+                    self.logger.error(f"获取视频列表失败: {data.get('message')}")
                     break
             except Exception as e:
-                self.logger.error(f"获取视频列表第{pn}页异常: {e}")
+                self.logger.error(f"获取视频列表异常: {e}")
                 break
-
         if all_videos:
             self.cached_videos = all_videos
             self.last_video_fetch_time = current_time
             self.save_video_cache(all_videos)
-            self.logger.info(f"成功获取视频列表，共 {len(all_videos)} 个视频")
+            socketio.emit("video_list", {"count": len(all_videos), "videos": all_videos[:20]})
             return all_videos
-        else:
-            # 如果获取失败，尝试使用旧缓存
-            if self.cached_videos:
-                self.logger.warning("获取视频列表失败，使用过期缓存")
-                return self.cached_videos
+        return self.cached_videos
 
-            # 没有任何缓存，给出详细帮助
-            self.logger.error("="*50)
-            self.logger.error("获取视频列表失败，请检查以下配置：")
-            self.logger.error("1. uid：是否在配置文件中正确设置？")
-            self.logger.error("2. cookie：是否在配置文件中正确设置？")
-            self.logger.error("3. 如果使用老版本升级，请复制 config.example.toml 为 config.toml")
-            self.logger.error("="*50)
-            return []
-    
-    def decompress_response(self, response) -> str:
-        """解压响应内容"""
-        import gzip
-        import zlib
-        
+    def bvid_to_aid(self, bvid: str) -> str:
+        url = "https://api.bilibili.com/x/web-interface/view"
         try:
-            # 如果response.text已经可用且不是乱码，直接返回
-            if hasattr(response, 'text') and response.text:
-                # 检查是否是有效的文本内容（不是二进制乱码）
-                try:
-                    # 尝试编码/解码来验证
-                    response.text.encode('utf-8').decode('utf-8')
-                    return response.text
-                except:
-                    pass
-            
-            # 获取原始内容
-            content = response.content if hasattr(response, 'content') else response.text
-            
-            if not content:
+            response = self.make_request_with_retry("GET", url, params={"bvid": bvid})
+            if not response:
                 return ""
-            
-            # 检查是否是gzip压缩数据（gzip魔数：1f 8b）
-            if content[:2] == b'\x1f\x8b':
-                try:
-                    decompressed = gzip.decompress(content)
-                    return decompressed.decode('utf-8')
-                except Exception as e:
-                    self.logger.debug(f"gzip解压失败: {e}")
-            
-            # 检查是否是zlib/deflate压缩数据
-            try:
-                decompressed = zlib.decompress(content)
-                return decompressed.decode('utf-8')
-            except Exception as e:
-                self.logger.debug(f"zlib解压失败: {e}")
-            
-            # 尝试直接解码
-            if isinstance(content, bytes):
-                return content.decode('utf-8', errors='ignore')
-            else:
-                return str(content)
-            
-        except Exception as e:
-            self.logger.error(f"解压响应内容失败: {e}")
-            # 返回原始text（如果有）
-            if hasattr(response, 'text'):
-                return response.text
+            rt = self.decompress_response(response)
+            data = json.loads(rt)
+            if data.get("code") == 0:
+                return str(data.get("data", {}).get("aid", ""))
             return ""
-    
+        except Exception:
+            return ""
+
     def get_video_comments(self, bvid: str) -> List[Comment]:
-        """获取视频评论（遍历所有页）"""
-        self.logger.debug(f"开始获取视频 {bvid} 的评论")
         url = "https://api.bilibili.com/x/v2/reply"
         aid = self.bvid_to_aid(bvid)
-
         if not aid:
-            self.logger.error(f"视频 {bvid} 无法获取aid，跳过获取评论")
             return []
-
-        self.logger.info(f"视频 {bvid} 的aid: {aid}，开始获取评论")
         all_comments = []
         pn = 1
-        # 从配置读取最大页数限制，默认为10页以优化性能
-        max_pn = self.config['bilibili'].get('max_comment_pages', 10)
-        page_size = 20  # 每页评论数（B站API限制，建议使用较小的值）
-
+        max_pn = self.config["bilibili"].get("max_comment_pages", 10)
+        page_size = 20
         while pn <= max_pn:
-            params = {
-                'type': 1,
-                'oid': aid,
-                'pn': pn,
-                'ps': page_size,
-                'sort': 2  # 按时间排序
-            }
-
-            self.logger.debug(f"请求评论第{pn}页, 参数: {params}")
+            params = {"type": 1, "oid": aid, "pn": pn, "ps": page_size, "sort": 2}
             try:
-                response = self.make_request_with_retry('GET', url, params=params)
+                response = self.make_request_with_retry("GET", url, params=params)
                 if not response:
-                    self.logger.warning(f"视频 {bvid} 第{pn}页请求失败，停止获取")
                     break
-
-                # 解压响应内容
-                response_text = self.decompress_response(response)
-
-                if not response_text:
-                    self.logger.error(f"视频 {bvid} 第{pn}页响应内容为空，停止获取")
-                    break
-
-                # 记录响应内容的前200个字符用于调试
-                self.logger.debug(f"视频 {bvid} 第{pn}页响应内容预览: {response_text[:200]}")
-                
-                # 尝试解析JSON
-                try:
-                    data = json.loads(response_text)
-                except json.JSONDecodeError as e:
-                    self.logger.error(f"视频 {bvid} 第{pn}页JSON解析失败: {e}")
-                    self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
-                    break
-                
-                if data.get('code') == 0:
-                    replies = data.get('data', {}).get('replies', [])
-
+                rt = self.decompress_response(response)
+                data = json.loads(rt)
+                if data.get("code") == 0:
+                    replies = data.get("data", {}).get("replies", [])
                     if not replies:
-                        # 没有更多评论了
-                        self.logger.info(f"视频 {bvid} 第{pn}页无评论，停止获取")
                         break
-
-                    # 解析当前页的评论
-                    for reply in replies:
-                        comment = Comment(
-                            comment_id=str(reply['rpid']),
-                            content=reply['content']['message'],
-                            user=reply['member']['uname'],
-                            uid=str(reply['member']['mid']),
-                            time=reply['ctime']
-                        )
-                        all_comments.append(comment)
-
-                    self.logger.info(f"视频 {bvid} 第{pn}页获取到 {len(replies)} 条评论，累计 {len(all_comments)} 条")
-                    self.logger.debug(f"评论响应: code={data.get('code')}, total={data.get('data', {}).get('page', {}).get('count', 0)}")
-                    
-                    # 检查是否还有更多页面
-                    page_info = data.get('data', {}).get('page', {})
-                    count = page_info.get('count', 0)  # 总评论数
-                    size = page_info.get('size', page_size)  # 每页大小
-                    
-                    # 如果当前页的评论数小于页面大小，说明没有更多评论了
-                    if len(replies) < size:
-                        self.logger.info(f"视频 {bvid} 已获取所有评论，共 {len(all_comments)} 条")
+                    for r in replies:
+                        all_comments.append(Comment(
+                            comment_id=str(r["rpid"]),
+                            content=r["content"]["message"],
+                            user=r["member"]["uname"],
+                            uid=str(r["member"]["mid"]),
+                            time=r["ctime"],
+                        ))
+                    if len(replies) < page_size:
                         break
-                    
                     pn += 1
                 else:
-                    error_msg = data.get('message', '')
-                    # 检查是否是ps参数超限错误
-                    if 'ps out of bounds' in error_msg or '参数错误' in error_msg:
-                        self.logger.warning(f"视频 {bvid} page_size={page_size} 超出限制，尝试使用更小的值")
-                        # 如果第一页就失败且page_size > 10，尝试更小的值
-                        if pn == 1 and page_size > 10:
-                            page_size = max(10, page_size // 2)
-                            self.logger.info(f"视频 {bvid} 调整 page_size 为 {page_size}，重试")
-                            continue  # 使用新的page_size重试
-                        else:
-                            self.logger.error(f"视频 {bvid} 第{pn}页获取评论失败: {error_msg}")
-                            break
-                    else:
-                        self.logger.error(f"视频 {bvid} 第{pn}页获取评论失败: {error_msg}")
-                        break
+                    err = data.get("message", "")
+                    if "ps out of bounds" in err and pn == 1 and page_size > 10:
+                        page_size = 10
+                        continue
+                    break
             except Exception as e:
-                self.logger.error(f"视频 {bvid} 第{pn}页获取评论异常: {e}")
+                self.logger.error(f"获取评论异常: {e}")
                 break
-        
-        if all_comments:
-            self.logger.info(f"视频 {bvid} 总共获取到 {len(all_comments)} 条评论")
-        else:
-            self.logger.info(f"视频 {bvid} 暂无评论")
-        
         return all_comments
-    
-    def bvid_to_aid(self, bvid: str) -> str:
-        """将BV号转换为AV号"""
-        self.logger.debug(f"BV转AV: {bvid}")
-        url = "https://api.bilibili.com/x/web-interface/view"
-        params = {'bvid': bvid}
 
-        try:
-            response = self.make_request_with_retry('GET', url, params=params)
-            if not response:
-                self.logger.error(f"BV号 {bvid} 转换失败，无响应")
-                return ""
-            
-            # 解压响应内容
-            response_text = self.decompress_response(response)
-            
-            if not response_text:
-                self.logger.error(f"BV号 {bvid} 转换失败，响应内容为空")
-                return ""
-            
-            # 尝试解析JSON
-            try:
-                data = json.loads(response_text)
-            except json.JSONDecodeError as e:
-                self.logger.error(f"BV号 {bvid} JSON解析失败: {e}")
-                self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
-                return ""
-            
-            if data.get('code') == 0:
-                aid = data.get('data', {}).get('aid')
-                if aid:
-                    return str(aid)
-                else:
-                    self.logger.error(f"BV号 {bvid} 转换失败，未找到aid")
-                    return ""
-            else:
-                self.logger.error(f"BV号 {bvid} 转换失败: {data.get('message')}")
-                return ""
-        except Exception as e:
-            self.logger.error(f"BV号 {bvid} 转换异常: {e}")
-            return ""
-    
     def generate_reply(self, comment: str, context: List[Comment] = None, video_title: str = None, video_desc: str = None) -> Optional[str]:
-        """使用DeepSeek API生成回复
-
-        Args:
-            comment: 待回复的评论内容
-            context: 前面N条评论作为上下文（可选）
-            video_title: 视频标题（可选）
-            video_desc: 视频简介（可选）
-
-        Returns:
-            生成的回复内容
-        """
-        self.logger.debug(f"开始生成回复, 评论内容: {comment[:50]}...")
-        api_config = self.config['deepseek']
-
-        headers = {
-            'Authorization': f"Bearer {api_config['api_key']}",
-            'Content-Type': 'application/json'
-        }
-
-        self.logger.debug(f"DeepSeek API配置: model={api_config['model']}, base_url={api_config['base_url']}")
-
-        # 从配置文件读取系统提示词
-        system_prompt = api_config.get('system_prompt',
-            '你是一个友善的B站游戏区Minecraft UP主，请对评论做出自然、友好的回复。回复要简洁明了，控制在100字以内。')
-
-        # 构建消息列表
-        messages = [
-            {'role': 'system', 'content': system_prompt}
-        ]
-
-        # 如果有视频标题和简介，添加到上下文信息中
+        api_config = self.config["deepseek"]
+        headers = {"Authorization": f"Bearer {api_config['api_key']}", "Content-Type": "application/json"}
+        system_prompt = api_config.get("system_prompt", "你是一个友善的B站UP主，请对评论做出自然、友好的回复。控制在100字以内。")
+        messages = [{"role": "system", "content": system_prompt}]
         video_context = ""
         if video_title or video_desc:
-            video_context += "视频信息：\n"
+            video_context = "视频信息：\n"
             if video_title:
                 video_context += f"标题：{video_title}\n"
             if video_desc:
                 video_context += f"简介：{video_desc}\n"
-            video_context += "\n"
-
-        # 如果有上下文评论，先添加到消息列表
         if context or video_context:
-            context_text = video_context
+            ctx_text = video_context
             if context:
-                context_text += "以下是前面的评论，可以帮助你理解上下文：\n\n"
-                for i, ctx_comment in enumerate(context, 1):
-                    context_text += f"{i}. {ctx_comment.user}: {ctx_comment.content}\n"
-                self.logger.debug(f"使用 {len(context)} 条评论作为上下文")
-            messages.append({'role': 'user', 'content': context_text.strip()})
-
-        # 添加当前需要回复的评论
-        messages.append({'role': 'user', 'content': comment})
-
+                ctx_text += "前面的评论上下文：\n"
+                for i, c in enumerate(context, 1):
+                    ctx_text += f"{i}. {c.user}: {c.content}\n"
+            messages.append({"role": "user", "content": ctx_text.strip()})
+        messages.append({"role": "user", "content": comment})
         data = {
-            'model': api_config['model'],
-            'messages': messages,
-            'max_tokens': api_config['max_tokens'],
-            'temperature': api_config['temperature']
+            "model": api_config["model"],
+            "messages": messages,
+            "max_tokens": api_config["max_tokens"],
+            "temperature": api_config["temperature"],
         }
-
         try:
-            self.logger.debug(f"DeepSeek API请求: {api_config['base_url']}/chat/completions")
-            response = requests.post(
-                f"{api_config['base_url']}/chat/completions",
-                headers=headers,
-                json=data,
-                timeout=30
-            )
-
+            response = requests.post(f"{api_config['base_url']}/chat/completions", headers=headers, json=data, timeout=30)
             if response.status_code == 200:
-                result = response.json()
-                reply = result['choices'][0]['message']['content'].strip()
-                self.logger.info(f"DeepSeek生成回复: {reply}")
-                return reply
-            else:
-                self.logger.error(f"DeepSeek API调用失败: {response.status_code}, {response.text}")
-                return None
-        except Exception as e:
-            self.logger.error(f"DeepSeek API调用异常: {e}", exc_info=True)
+                return response.json()["choices"][0]["message"]["content"].strip()
+            self.logger.error(f"DeepSeek API失败: {response.status_code} {response.text[:200]}")
             return None
-    
+        except Exception as e:
+            self.logger.error(f"DeepSeek API异常: {e}")
+            return None
+
     def like_comment(self, bvid: str, comment_id: str) -> bool:
-        """给评论点赞"""
-        self.logger.debug(f"点赞评论: bvid={bvid}, comment_id={comment_id}")
-        # 确保使用最新的CSRF token
         if self.cookie_manager:
             self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
-
         if not self.csrf_token:
-            self.logger.error("未找到CSRF token，无法点赞评论")
             return False
-
         url = "https://api.bilibili.com/x/v2/reply/action"
         aid = self.bvid_to_aid(bvid)
-
-        data = {
-            'type': 1,
-            'oid': aid,
-            'rpid': comment_id,
-            'action': 1,  # 1表示点赞，2表示取消点赞
-            'csrf': self.csrf_token
-        }
-
-        self.logger.debug(f"点赞API请求: {url}, data={data}")
+        data = {"type": 1, "oid": aid, "rpid": comment_id, "action": 1, "csrf": self.csrf_token}
         try:
-            response = self.make_request_with_retry('POST', url, data=data)
+            response = self.make_request_with_retry("POST", url, data=data)
             if not response:
                 return False
-
-            # 解压响应内容
-            response_text = self.decompress_response(response)
-
-            if not response_text:
-                self.logger.error(f"点赞评论失败，响应内容为空")
-                return False
-
-            # 尝试解析JSON
-            try:
-                result = json.loads(response_text)
-            except json.JSONDecodeError as e:
-                self.logger.error(f"点赞评论JSON解析失败: {e}")
-                self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
-                return False
-
-            if result.get('code') == 0:
-                self.logger.info(f"成功点赞评论 {comment_id}")
-                return True
-            else:
-                self.logger.error(f"点赞评论失败: {result.get('message')}")
-                return False
-        except Exception as e:
-            self.logger.error(f"点赞评论异常: {e}")
+            result = json.loads(self.decompress_response(response))
+            return result.get("code") == 0
+        except Exception:
             return False
-    
+
     def reply_comment(self, bvid: str, comment_id: str, content: str) -> bool:
-        """回复评论"""
-        self.logger.info(f"准备回复评论, bvid={bvid}, comment_id={comment_id}")
-        # 确保使用最新的CSRF token
         if self.cookie_manager:
             self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
-
         if not self.csrf_token:
-            self.logger.error("未找到CSRF token，无法回复评论")
+            self.logger.error("未找到CSRF token")
             return False
-
-        self.logger.debug(f"CSRF Token: {self.csrf_token[:10] if self.csrf_token else 'None'}...")
-
-        # 验证登录状态
         if self.cookie_manager:
-            is_valid, verify_result = self.cookie_manager.verify_cookie()
+            is_valid, result = self.cookie_manager.verify_cookie()
             if not is_valid:
-                error_msg = verify_result.get('message', '未知错误')
-                error_code = verify_result.get('code')
-                self.logger.error(f"回复评论失败: 账号未登录或Cookie已过期 ({error_msg}), code={error_code}")
-                if error_code == -101:
-                    self.logger.error("Cookie已失效，请重新获取Cookie并确保包含SESSDATA和bili_jct字段")
+                self.logger.error(f"Cookie无效: {result.get('message')}")
                 return False
-
         url = "https://api.bilibili.com/x/v2/reply/add"
         aid = self.bvid_to_aid(bvid)
-        self.logger.debug(f"回复评论 API: {url}, aid={aid}")
-
-        # 添加回复前缀
-        prefix = self.config['reply']['prefix']
-        reply_content = f"{prefix}{content}"
-        self.logger.debug(f"回复内容: {reply_content}")
-
-        data = {
-            'type': 1,
-            'oid': aid,
-            'root': comment_id,
-            'parent': comment_id,
-            'message': reply_content,
-            'csrf': self.csrf_token
-        }
-
-        self.logger.debug(f"POST数据: {data}")
+        prefix = self.config["reply"].get("prefix", "")
+        data = {"type": 1, "oid": aid, "root": comment_id, "parent": comment_id, "message": f"{prefix}{content}", "csrf": self.csrf_token}
         try:
-            response = self.make_request_with_retry('POST', url, data=data)
+            response = self.make_request_with_retry("POST", url, data=data)
             if not response:
                 return False
-
-            # 解压响应内容
-            response_text = self.decompress_response(response)
-
-            if not response_text:
-                self.logger.error(f"回复评论失败，响应内容为空")
-                return False
-
-            # 尝试解析JSON
-            try:
-                result = json.loads(response_text)
-            except json.JSONDecodeError as e:
-                self.logger.error(f"回复评论JSON解析失败: {e}")
-                self.logger.error(f"响应内容长度: {len(response_text)}, 前100字符: {response_text[:100]}")
-                return False
-
-            if result.get('code') == 0:
-                self.logger.info(f"成功回复评论 {comment_id}: {reply_content}")
+            result = json.loads(self.decompress_response(response))
+            if result.get("code") == 0:
+                self.logger.info(f"回复成功: {comment_id}")
                 return True
-            else:
-                self.logger.error(f"回复评论失败: {result.get('message')}")
-                return False
+            self.logger.error(f"回复失败: {result.get('message')}")
+            return False
         except Exception as e:
-            self.logger.error(f"回复评论异常: {e}")
+            self.logger.error(f"回复异常: {e}")
             return False
-    
-    def refresh_cookie_if_needed(self) -> bool:
-        """
-        检查并刷新Cookie（如果需要）
 
-        Returns:
-            bool: 是否执行了刷新操作
-        """
+    def refresh_cookie_if_needed(self):
         if not self.cookie_manager or not self.cookie_manager.refresh_token:
-            return False
-
-        # 检查是否到了刷新时间
+            return
         current_time = time.time()
         if current_time - self.last_cookie_refresh_time < self.cookie_refresh_interval:
-            return False
-
-        self.logger.info("检查Cookie状态...")
+            return
         need_refresh, result = self.cookie_manager.auto_refresh_if_needed()
-
-        if need_refresh:
-            success = result[0]
-            if success:
-                result_data = result[1]
-                new_refresh_token = result_data.get('new_refresh_token')
-                new_cookies = result_data.get('cookies')
-
-                # 更新session的cookie
-                self.session.cookies.clear()
-                self.session.cookies.update(new_cookies)
-
-                # 同步cookie_manager的cookie到main session
-                self.session.cookies.update(self.cookie_manager.session.cookies)
-
-                # 更新CSRF token
-                self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
-
-                # 验证刷新后的Cookie是否有效
-                self.logger.info("验证刷新后的Cookie...")
-                is_valid, verify_result = self.cookie_manager.verify_cookie()
-                if is_valid:
-                    user_info = verify_result.get('user_info', {})
-                    self.logger.info(f"刷新后的Cookie有效，用户: {user_info.get('name', 'N/A')}")
-                else:
-                    self.logger.warning(f"刷新后的Cookie验证失败: {verify_result.get('message')}")
-
-                # 更新配置文件
-                if new_refresh_token:
-                    self.config['bilibili']['refresh_token'] = new_refresh_token
-                    self.update_config_file()
-
-                # 保存到文件
-                self.cookie_manager.save_to_file('bilibili_cookie.json')
-
-                self.last_cookie_refresh_time = current_time
-                self.logger.info(f"Cookie刷新成功: {result_data.get('message')}")
-                return True
-            else:
-                error_msg = result[1].get('message', '未知错误')
-                self.logger.error(f"Cookie刷新失败: {error_msg}")
-                if 'Cookie已过期' in error_msg:
-                    self.logger.error("Cookie已过期，需要重新登录获取refresh_token")
-        else:
-            self.logger.debug(f"Cookie状态正常: {result.get('message')}")
-            self.last_cookie_refresh_time = current_time
-
-        return False
-
-    def update_config_file(self):
-        """更新配置文件"""
-        try:
-            with open('config.toml', 'w', encoding='utf-8') as f:
-                toml.dump(self.config, f)
-            self.logger.info("配置文件已更新（refresh_token）")
-        except Exception as e:
-            self.logger.error(f"更新配置文件失败: {e}")
+        if need_refresh and result.get("success"):
+            self.session.cookies.update(self.cookie_manager.session.cookies)
+            self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
+            new_rt = result.get("new_refresh_token")
+            if new_rt:
+                self.config["bilibili"]["refresh_token"] = new_rt
+                save_config(self.config)
+            self.cookie_manager.save_to_file(COOKIE_FILE)
+            self.logger.info("Cookie自动刷新成功")
+        self.last_cookie_refresh_time = current_time
 
     def process_comments(self):
-        """处理评论"""
-        self.logger.debug("="*30)
-        self.logger.debug("开始处理评论")
-        # 检查并刷新Cookie（如果需要）
         if self.auto_refresh_cookie:
             self.refresh_cookie_if_needed()
-
-        if not self.config['reply']['enabled']:
-            self.logger.info("自动回复已禁用")
+        if not self.config["reply"].get("enabled", True):
             return
-
         videos = self.get_video_list()
         if not videos:
-            self.logger.debug("没有获取到视频列表")
+            self.logger.warning("未获取到视频列表")
             return
-
-        self.logger.info(f"获取到 {len(videos)} 个视频，开始处理评论")
-        max_process = self.config['reply']['max_process']
+        max_process = self.config["reply"].get("max_process", 10)
+        context_count = self.config["reply"].get("context_comments_count", 0)
         processed_count = 0
-
-        # 获取上下文评论数量配置
-        context_count = self.config['reply'].get('context_comments_count', 0)
-        self.logger.debug(f"最大处理数: {max_process}, 上下文评论数: {context_count}")
-
         for video in videos:
             if processed_count >= max_process:
-                self.logger.info(f"已处理 {processed_count} 条评论，达到最大处理数 {max_process}，停止处理")
                 break
-
-            bvid = video['bvid']
-            title = video.get('title', '未知标题')
-            self.logger.info(f"处理视频: {bvid}, 标题: {title}")
+            bvid = video["bvid"]
+            title = video.get("title", "")
+            self.logger.info(f"处理视频: {title} ({bvid})")
             comments = self.get_video_comments(bvid)
-            self.logger.debug(f"视频 {bvid} 获取到 {len(comments)} 条评论")
-
             for idx, comment in enumerate(comments):
                 if processed_count >= max_process:
                     break
-
-                # 检查是否已处理过
                 if comment.comment_id in self.processed_comments:
-                    self.logger.debug(f"评论 {comment.comment_id} 已处理过，跳过")
                     continue
-
-                self.logger.info(f"处理新评论: id={comment.comment_id}, 用户={comment.user}, 内容={comment.content[:30]}...")
-
-                # 检查是否只处理新评论
-                if self.config['reply']['only_new']:
-                    # 这里可以添加更复杂的新评论判断逻辑
-                    # 比如检查评论时间等
-                    pass
-
-                # 获取上下文评论（当前评论之前的评论）
-                context_comments = []
+                self.logger.info(f"处理评论: [{comment.user}] {comment.content[:40]}...")
+                context = []
                 if context_count > 0 and idx > 0:
-                    # 取前面的N条评论作为上下文
-                    start_idx = max(0, idx - context_count)
-                    context_comments = comments[start_idx:idx]
-                    self.logger.debug(f"评论 {comment.comment_id} 使用前 {len(context_comments)} 条评论作为上下文")
-
-                # 生成回复（带上上下文和视频信息）
-                video_title = video.get('title', '')
-                video_desc = video.get('desc', '')
-                self.logger.debug(f"调用DeepSeek生成回复...")
-                reply_content = self.generate_reply(comment.content, context_comments, video_title, video_desc)
-                if reply_content:
-                    self.logger.debug(f"生成的回复: {reply_content[:50]}...")
-                    # 如果启用了点赞功能，先点赞评论
-                    if self.config['reply'].get('like_enabled', False):
-                        self.logger.debug(f"点赞评论: {comment.comment_id}")
+                    context = comments[max(0, idx - context_count):idx]
+                reply = self.generate_reply(comment.content, context, title, video.get("desc", ""))
+                if reply:
+                    if self.config["reply"].get("like_enabled", False):
                         self.like_comment(bvid, comment.comment_id)
-
-                    # 发送回复
-                    self.logger.info(f"发送回复: {reply_content[:30]}...")
-                    if self.reply_comment(bvid, comment.comment_id, reply_content):
+                    if self.reply_comment(bvid, comment.comment_id, reply):
                         self.processed_comments.add(comment.comment_id)
-                        # 保存到历史记录
-                        self.save_history(comment, reply_content)
+                        self.save_history(comment, reply)
                         processed_count += 1
-                        self.logger.info(f"回复成功，已处理 {processed_count} 条评论")
-
-                        # 延迟避免频繁操作
-                        delay = self.config['reply']['reply_delay']
+                        self.stats["total_replied"] += 1
+                        delay = self.config["reply"].get("reply_delay", 2)
                         if delay > 0:
                             time.sleep(delay)
                 else:
-                    self.logger.warning(f"评论 {comment.comment_id} 生成回复失败，跳过")
-    
-    def run(self):
-        """运行机器人"""
-        self.logger.info("="*50)
-        self.logger.info("开始运行B站评论自动回复机器人")
-        self.logger.info(f"检查间隔: {self.config['bilibili']['check_interval']}秒")
-        self.logger.info("="*50)
+                    self.logger.warning(f"生成回复失败，跳过评论 {comment.comment_id}")
 
+    def get_stats(self) -> dict:
+        return {
+            "running": self._running,
+            "total_replied": self.stats["total_replied"],
+            "start_time": self.stats["start_time"],
+            "last_check": self.stats["last_check"],
+            "processed_count": len(self.processed_comments),
+            "cached_videos": len(self.cached_videos),
+        }
+
+    def verify_login(self) -> dict:
+        if not self.cookie_manager:
+            return {"valid": False, "message": "未配置Cookie"}
+        valid, result = self.cookie_manager.verify_cookie()
+        return {"valid": valid, **result}
+
+
+# ─────────────────────────────────────────────
+#  扫码登录
+# ─────────────────────────────────────────────
+BILI_QR_GENERATE = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
+BILI_QR_POLL = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
+BILI_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36", "Referer": "https://www.bilibili.com"}
+
+_qr_session: Optional[requests.Session] = None
+_qr_key: Optional[str] = None
+_qr_thread: Optional[threading.Thread] = None
+
+
+def _gen_qr_image_base64(url: str) -> str:
+    """生成二维码图片并返回base64字符串"""
+    import qrcode
+    from PIL import Image
+    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=4)
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _poll_qr_login(qr_key: str, session: requests.Session):
+    """后台线程：轮询二维码登录状态"""
+    global _qr_session, _qr_key
+    params = {"qrcode_key": qr_key}
+    timeout = 180
+    start = time.time()
+    last_code = None
+    while time.time() - start < timeout:
         try:
-            while True:
-                self.logger.info("-"*30)
-                self.logger.info("开始新一轮评论检查")
-                try:
-                    self.process_comments()
-                except Exception as e:
-                    self.logger.error(f"处理评论时发生异常: {e}", exc_info=True)
+            resp = session.get(BILI_QR_POLL, params=params, headers=BILI_HEADERS, timeout=10)
+            data = resp.json()["data"]
+            code = data["code"]
+            if code != last_code:
+                last_code = code
+                msg_map = {86101: "等待扫码...", 86090: "已扫码，请在手机确认", 86038: "二维码已失效", 0: "登录成功！"}
+                socketio.emit("qr_status", {"code": code, "message": msg_map.get(code, str(code))})
+            if code == 0:
+                cookies = dict(session.cookies)
+                if data.get("url"):
+                    from urllib.parse import urlparse, parse_qs
+                    qs = parse_qs(urlparse(data["url"]).query)
+                    for k, v in qs.items():
+                        if k not in cookies:
+                            cookies[k] = v[0]
+                cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+                socketio.emit("qr_cookie", {"cookie": cookie_str, "cookies": cookies})
+                return
+            if code == 86038:
+                return
+        except Exception as e:
+            socketio.emit("qr_status", {"code": -1, "message": f"请求错误: {e}"})
+        time.sleep(1.5)
+    socketio.emit("qr_status", {"code": -2, "message": "登录超时"})
 
-                # 等待下次检查
-                interval = self.config['bilibili']['check_interval']
-                self.logger.info(f"本次检查完成，等待 {interval} 秒后进行下次检查")
-                time.sleep(interval)
 
-        except KeyboardInterrupt:
-            self.logger.info("收到停止信号，机器人停止运行")
-        finally:
-            # 确保退出时保存状态
-            self.__exit__(None, None, None)
+# ─────────────────────────────────────────────
+#  全局机器人实例
+# ─────────────────────────────────────────────
+_bot: Optional[BiliCommentBot] = None
+_bot_logger: Optional[logging.Logger] = None
 
 
-def main():
-    """主函数"""
+def get_bot() -> BiliCommentBot:
+    global _bot, _bot_logger
+    if _bot is None:
+        cfg = load_config()
+        _bot_logger = _setup_logger(cfg)
+        _bot = BiliCommentBot(cfg, _bot_logger)
+    return _bot
+
+
+def _setup_logger(cfg: dict) -> logging.Logger:
+    log_cfg = cfg.get("logging", {})
+    level = getattr(logging, log_cfg.get("level", "INFO").upper(), logging.INFO)
+    log_file = log_cfg.get("file", "logs/bot.log")
+    log_dir = os.path.dirname(log_file)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+    logger = logging.getLogger("BiliBot")
+    logger.setLevel(level)
+    logger.handlers.clear()
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(fh)
+    if log_cfg.get("console", True):
+        ch = logging.StreamHandler()
+        ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        logger.addHandler(ch)
+    logger.addHandler(ws_log_handler)
+    return logger
+
+
+# ─────────────────────────────────────────────
+#  Flask 路由
+# ─────────────────────────────────────────────
+@app.route("/")
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+
+@app.route("/api/config", methods=["GET"])
+def api_get_config():
+    cfg = load_config()
+    return jsonify({"ok": True, "config": cfg})
+
+
+@app.route("/api/config", methods=["POST"])
+def api_save_config():
+    data = request.get_json()
+    if not data:
+        return jsonify({"ok": False, "message": "无效数据"})
+    cfg = load_config()
+    # 深度更新
+    def deep_update(base, upd):
+        for k, v in upd.items():
+            if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+                deep_update(base[k], v)
+            else:
+                base[k] = v
+    deep_update(cfg, data)
+    if save_config(cfg):
+        # 热更新机器人配置
+        bot = get_bot()
+        bot.reload_config(cfg)
+        return jsonify({"ok": True, "message": "配置已保存"})
+    return jsonify({"ok": False, "message": "保存失败"})
+
+
+@app.route("/api/bot/start", methods=["POST"])
+def api_bot_start():
+    bot = get_bot()
+    result = bot.start()
+    return jsonify({"ok": result, "message": "已启动" if result else "已在运行中"})
+
+
+@app.route("/api/bot/stop", methods=["POST"])
+def api_bot_stop():
+    bot = get_bot()
+    result = bot.stop()
+    return jsonify({"ok": result, "message": "已停止" if result else "未在运行"})
+
+
+@app.route("/api/bot/status", methods=["GET"])
+def api_bot_status():
+    bot = get_bot()
+    return jsonify({"ok": True, **bot.get_stats()})
+
+
+@app.route("/api/bot/verify", methods=["GET"])
+def api_verify():
+    bot = get_bot()
+    return jsonify({"ok": True, **bot.verify_login()})
+
+
+@app.route("/api/history", methods=["GET"])
+def api_history():
+    page = int(request.args.get("page", 1))
+    per_page = int(request.args.get("per_page", 20))
     try:
-        bot = BiliCommentBot()
-        bot.run()
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                history = json.load(f)
+            history.sort(key=lambda x: x.get("reply_time", 0), reverse=True)
+            total = len(history)
+            start = (page - 1) * per_page
+            end = start + per_page
+            return jsonify({"ok": True, "total": total, "page": page, "data": history[start:end]})
+        return jsonify({"ok": True, "total": 0, "page": 1, "data": []})
     except Exception as e:
-        print(f"启动失败: {e}")
+        return jsonify({"ok": False, "message": str(e)})
+
+
+@app.route("/api/history/clear", methods=["POST"])
+def api_history_clear():
+    try:
+        if os.path.exists(HISTORY_FILE):
+            os.remove(HISTORY_FILE)
+        bot = get_bot()
+        bot.processed_comments.clear()
+        return jsonify({"ok": True, "message": "历史记录已清除"})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)})
+
+
+@app.route("/api/logs", methods=["GET"])
+def api_logs():
+    return jsonify({"ok": True, "logs": ws_log_handler.log_buffer[-200:]})
+
+
+@app.route("/api/qr/generate", methods=["POST"])
+def api_qr_generate():
+    global _qr_session, _qr_key, _qr_thread
+    try:
+        _qr_session = requests.Session()
+        resp = _qr_session.get(BILI_QR_GENERATE, headers=BILI_HEADERS, timeout=10)
+        data = resp.json()
+        if data["code"] != 0:
+            return jsonify({"ok": False, "message": "获取二维码失败"})
+        qr_url = data["data"]["url"]
+        _qr_key = data["data"]["qrcode_key"]
+        qr_b64 = _gen_qr_image_base64(qr_url)
+        # 启动轮询线程
+        _qr_thread = threading.Thread(target=_poll_qr_login, args=(_qr_key, _qr_session), daemon=True)
+        _qr_thread.start()
+        return jsonify({"ok": True, "qr_image": qr_b64})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)})
+
+
+@app.route("/api/cache/clear", methods=["POST"])
+def api_cache_clear():
+    bot = get_bot()
+    bot.cached_videos = []
+    bot.last_video_fetch_time = 0
+    if os.path.exists(VIDEO_CACHE_FILE):
+        os.remove(VIDEO_CACHE_FILE)
+    return jsonify({"ok": True, "message": "视频缓存已清除"})
+
+
+@app.route("/api/videos", methods=["GET"])
+def api_videos():
+    bot = get_bot()
+    return jsonify({"ok": True, "count": len(bot.cached_videos), "videos": bot.cached_videos[:50]})
+
+
+# ─────────────────────────────────────────────
+#  SocketIO 事件
+# ─────────────────────────────────────────────
+@socketio.on("connect")
+def on_connect():
+    bot = get_bot()
+    emit("bot_status", {"running": bot.is_running})
+    emit("stats", bot.get_stats())
+    # 发送最近日志
+    emit("log_history", {"logs": ws_log_handler.log_buffer[-100:]})
+
+
+# ─────────────────────────────────────────────
+#  HTML 模板（单页应用）
+# ─────────────────────────────────────────────
+HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>B站评论机器人</title>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22263a;
+    --border: #2e3250;
+    --accent: #fb7299;
+    --accent2: #23ade5;
+    --green: #23c562;
+    --yellow: #f6c90e;
+    --red: #f05050;
+    --text: #e8eaf6;
+    --text2: #8b92b8;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+  a { color: var(--accent2); text-decoration: none; }
+
+  /* Layout */
+  .app { display: flex; min-height: 100vh; }
+  .sidebar {
+    width: 220px; min-height: 100vh; background: var(--surface);
+    border-right: 1px solid var(--border); display: flex; flex-direction: column;
+    padding: 24px 0; position: fixed; top: 0; left: 0; bottom: 0;
+  }
+  .sidebar-logo { padding: 0 20px 24px; border-bottom: 1px solid var(--border); }
+  .sidebar-logo .logo-title { font-size: 17px; font-weight: 700; color: var(--accent); }
+  .sidebar-logo .logo-sub { font-size: 12px; color: var(--text2); margin-top: 4px; }
+  .nav-list { list-style: none; margin-top: 16px; flex: 1; }
+  .nav-list li a {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 20px; color: var(--text2); font-size: 14px;
+    transition: all .2s; border-left: 3px solid transparent;
+  }
+  .nav-list li a:hover { background: var(--surface2); color: var(--text); }
+  .nav-list li a.active { background: var(--surface2); color: var(--accent); border-left-color: var(--accent); }
+  .nav-list li a .icon { font-size: 16px; width: 20px; text-align: center; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); display: inline-block; margin-left: auto; }
+  .status-dot.running { background: var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* Main */
+  .main { margin-left: 220px; flex: 1; padding: 32px; }
+
+  /* Page sections */
+  .page { display: none; }
+  .page.active { display: block; }
+  .page-title { font-size: 22px; font-weight: 700; margin-bottom: 24px; display: flex; align-items: center; gap: 10px; }
+  .page-title .icon { color: var(--accent); }
+
+  /* Cards */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; margin-bottom: 20px; }
+  .card-title { font-size: 14px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 16px; }
+
+  /* Stats grid */
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .stat-value { font-size: 28px; font-weight: 700; color: var(--accent); }
+  .stat-label { font-size: 12px; color: var(--text2); margin-top: 6px; }
+
+  /* Buttons */
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 20px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px; font-weight: 600; transition: all .2s; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-success { background: var(--green); color: #fff; }
+  .btn-success:hover { filter: brightness(1.1); }
+  .btn-danger { background: var(--red); color: #fff; }
+  .btn-danger:hover { filter: brightness(1.1); }
+  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { background: var(--border); }
+  .btn-info { background: var(--accent2); color: #fff; }
+  .btn-info:hover { filter: brightness(1.1); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Forms */
+  .form-group { margin-bottom: 18px; }
+  .form-label { font-size: 13px; color: var(--text2); margin-bottom: 6px; display: block; font-weight: 500; }
+  .form-input, .form-select, .form-textarea {
+    width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 12px; color: var(--text); font-size: 14px; transition: border .2s;
+  }
+  .form-input:focus, .form-select:focus, .form-textarea:focus { outline: none; border-color: var(--accent); }
+  .form-textarea { resize: vertical; min-height: 90px; font-family: inherit; }
+  .form-select { cursor: pointer; }
+  .form-check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .form-check input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+  .form-hint { font-size: 12px; color: var(--text2); margin-top: 4px; }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+
+  /* Tabs */
+  .tab-bar { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+  .tab-btn { padding: 10px 18px; background: none; border: none; color: var(--text2); cursor: pointer; font-size: 14px; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: all .2s; }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-btn:hover:not(.active) { color: var(--text); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* Log */
+  .log-container {
+    background: #080b12; border: 1px solid var(--border); border-radius: var(--radius);
+    height: 420px; overflow-y: auto; padding: 12px; font-family: 'Consolas', monospace; font-size: 13px;
+  }
+  .log-entry { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,.03); }
+  .log-entry .log-time { color: #4a5568; margin-right: 8px; }
+  .log-entry.INFO .log-level { color: var(--accent2); }
+  .log-entry.WARNING .log-level { color: var(--yellow); }
+  .log-entry.ERROR .log-level { color: var(--red); }
+  .log-entry.DEBUG .log-level { color: #6b7280; }
+
+  /* Table */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { padding: 10px 14px; text-align: left; color: var(--text2); font-weight: 600; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,.05); }
+  tr:hover td { background: rgba(255,255,255,.02); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+  .badge-green { background: rgba(35,197,98,.15); color: var(--green); }
+  .badge-blue { background: rgba(35,173,229,.15); color: var(--accent2); }
+  .badge-red { background: rgba(240,80,80,.15); color: var(--red); }
+
+  /* Alert */
+  .alert { padding: 12px 16px; border-radius: 8px; font-size: 14px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+  .alert-success { background: rgba(35,197,98,.1); border: 1px solid rgba(35,197,98,.3); color: var(--green); }
+  .alert-danger { background: rgba(240,80,80,.1); border: 1px solid rgba(240,80,80,.3); color: var(--red); }
+  .alert-info { background: rgba(35,173,229,.1); border: 1px solid rgba(35,173,229,.3); color: var(--accent2); }
+  .alert-warning { background: rgba(246,201,14,.1); border: 1px solid rgba(246,201,14,.3); color: var(--yellow); }
+
+  /* QR Code */
+  .qr-box { text-align: center; padding: 20px; }
+  .qr-box img { border: 4px solid #fff; border-radius: 8px; max-width: 220px; }
+  .qr-status { margin-top: 12px; font-size: 14px; }
+
+  /* Bot control */
+  .control-bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .running-badge { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: var(--surface2); border-radius: 8px; font-size: 14px; }
+
+  /* Pagination */
+  .pagination { display: flex; gap: 8px; align-items: center; margin-top: 16px; justify-content: flex-end; }
+  .page-btn { padding: 6px 12px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); cursor: pointer; font-size: 13px; }
+  .page-btn:hover { background: var(--border); }
+  .page-btn.active { background: var(--accent); border-color: var(--accent); }
+
+  /* Toast */
+  #toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
+  .toast { padding: 12px 20px; border-radius: 8px; font-size: 14px; color: #fff; animation: slideIn .3s ease; min-width: 200px; }
+  .toast.success { background: var(--green); }
+  .toast.error { background: var(--red); }
+  .toast.info { background: var(--accent2); }
+  @keyframes slideIn { from{transform:translateX(100%);opacity:0} to{transform:translateX(0);opacity:1} }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .sidebar { width: 60px; }
+    .sidebar-logo, .nav-list li a span:not(.icon) { display: none; }
+    .main { margin-left: 60px; padding: 16px; }
+    .form-row, .form-row-3 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div id="toast-container"></div>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-title">🤖 BiliBot</div>
+      <div class="logo-sub">B站评论自动回复</div>
+    </div>
+    <ul class="nav-list">
+      <li><a href="#" class="active" data-page="dashboard"><span class="icon">📊</span><span>控制台</span><span class="status-dot" id="nav-status-dot"></span></a></li>
+      <li><a href="#" data-page="config"><span class="icon">⚙️</span><span>配置</span></a></li>
+      <li><a href="#" data-page="login"><span class="icon">🔑</span><span>登录</span></a></li>
+      <li><a href="#" data-page="history"><span class="icon">📝</span><span>历史记录</span></a></li>
+      <li><a href="#" data-page="logs"><span class="icon">📋</span><span>实时日志</span></a></li>
+    </ul>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+
+    <!-- Dashboard -->
+    <div class="page active" id="page-dashboard">
+      <div class="page-title"><span class="icon">📊</span>控制台</div>
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-value" id="stat-total">0</div>
+          <div class="stat-label">总回复数</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-processed">0</div>
+          <div class="stat-label">已处理评论</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-videos">0</div>
+          <div class="stat-label">缓存视频数</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-status" style="font-size:16px;margin-top:4px">停止中</div>
+          <div class="stat-label">运行状态</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">机器人控制</div>
+        <div class="control-bar">
+          <button class="btn btn-success" id="btn-start" onclick="botStart()">▶ 启动机器人</button>
+          <button class="btn btn-danger" id="btn-stop" onclick="botStop()" disabled>⏹ 停止</button>
+          <button class="btn btn-secondary" onclick="verifyLogin()">🔍 验证登录状态</button>
+          <button class="btn btn-secondary" onclick="clearCache()">🗑 清除视频缓存</button>
+        </div>
+        <div id="verify-result" style="margin-top:12px"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">运行信息</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:14px">
+          <div><span style="color:var(--text2)">启动时间：</span><span id="info-start">-</span></div>
+          <div><span style="color:var(--text2)">上次检查：</span><span id="info-check">-</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Config -->
+    <div class="page" id="page-config">
+      <div class="page-title"><span class="icon">⚙️</span>配置</div>
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="tab-bilibili">B站配置</button>
+        <button class="tab-btn" data-tab="tab-deepseek">DeepSeek</button>
+        <button class="tab-btn" data-tab="tab-reply">回复策略</button>
+        <button class="tab-btn" data-tab="tab-rate">频率控制</button>
+        <button class="tab-btn" data-tab="tab-cache">缓存</button>
+        <button class="tab-btn" data-tab="tab-logging">日志</button>
+      </div>
+
+      <!-- B站 -->
+      <div class="tab-panel active" id="tab-bilibili">
+        <div class="card">
+          <div class="form-group">
+            <label class="form-label">B站 Cookie</label>
+            <textarea class="form-textarea" id="cfg-bilibili-cookie" rows="4" placeholder="SESSDATA=xxx; bili_jct=xxx; DedeUserID=xxx"></textarea>
+            <div class="form-hint">请确保包含 SESSDATA、bili_jct、DedeUserID 字段。可在「登录」页扫码自动获取。</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Refresh Token（用于自动刷新 Cookie）</label>
+            <input class="form-input" id="cfg-bilibili-refresh_token" placeholder="refresh_token">
+          </div>
+          <div class="form-group">
+            <label class="form-label">B站用户 ID（UID）</label>
+            <input class="form-input" id="cfg-bilibili-uid" placeholder="如：123456789">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">检查评论间隔（秒）</label>
+              <input class="form-input" type="number" id="cfg-bilibili-check_interval" value="60">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Cookie 刷新间隔（分钟）</label>
+              <input class="form-input" type="number" id="cfg-bilibili-cookie_refresh_interval" value="30">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">最大评论页数</label>
+              <input class="form-input" type="number" id="cfg-bilibili-max_comment_pages" value="10">
+            </div>
+            <div class="form-group">
+              <label class="form-label">最大视频页数</label>
+              <input class="form-input" type="number" id="cfg-bilibili-max_video_pages" value="10">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-bilibili-auto_refresh_cookie" checked>
+              启用 Cookie 自动刷新
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- DeepSeek -->
+      <div class="tab-panel" id="tab-deepseek">
+        <div class="card">
+          <div class="form-group">
+            <label class="form-label">DeepSeek API Key</label>
+            <input class="form-input" id="cfg-deepseek-api_key" placeholder="sk-xxx" type="password">
+          </div>
+          <div class="form-group">
+            <label class="form-label">API Base URL</label>
+            <input class="form-input" id="cfg-deepseek-base_url" value="https://api.deepseek.com/v1">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">模型</label>
+              <input class="form-input" id="cfg-deepseek-model" value="deepseek-chat">
+            </div>
+            <div class="form-group">
+              <label class="form-label">最大 Token 数</label>
+              <input class="form-input" type="number" id="cfg-deepseek-max_tokens" value="200">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">温度（0-1，越高越随机）</label>
+            <input class="form-input" type="number" step="0.1" min="0" max="1" id="cfg-deepseek-temperature" value="0.7">
+          </div>
+          <div class="form-group">
+            <label class="form-label">系统提示词（定义 AI 角色和回复风格）</label>
+            <textarea class="form-textarea" id="cfg-deepseek-system_prompt" rows="5"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reply -->
+      <div class="tab-panel" id="tab-reply">
+        <div class="card">
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-reply-enabled" checked>
+              启用自动回复
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-reply-only_new" checked>
+              只回复未处理过的评论
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-reply-like_enabled">
+              回复时同时点赞评论
+            </label>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">每次最多处理评论数</label>
+              <input class="form-input" type="number" id="cfg-reply-max_process" value="10">
+            </div>
+            <div class="form-group">
+              <label class="form-label">回复延迟（秒）</label>
+              <input class="form-input" type="number" id="cfg-reply-reply_delay" value="2">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">上下文评论数（0=不使用上下文）</label>
+            <input class="form-input" type="number" id="cfg-reply-context_comments_count" value="0">
+            <div class="form-hint">生成回复时参考前 N 条评论作为上下文</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">回复前缀（可留空）</label>
+            <input class="form-input" id="cfg-reply-prefix" placeholder="">
+          </div>
+        </div>
+      </div>
+
+      <!-- Rate Limit -->
+      <div class="tab-panel" id="tab-rate">
+        <div class="card">
+          <div class="form-row-3">
+            <div class="form-group">
+              <label class="form-label">最小请求间隔（秒）</label>
+              <input class="form-input" type="number" step="0.5" id="cfg-rate_limit-min_request_interval" value="2">
+            </div>
+            <div class="form-group">
+              <label class="form-label">最大重试次数</label>
+              <input class="form-input" type="number" id="cfg-rate_limit-max_retries" value="3">
+            </div>
+            <div class="form-group">
+              <label class="form-label">重试基础延迟（秒）</label>
+              <input class="form-input" type="number" id="cfg-rate_limit-retry_delay" value="5">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Cache -->
+      <div class="tab-panel" id="tab-cache">
+        <div class="card">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">GET 响应缓存时间（秒）</label>
+              <input class="form-input" type="number" id="cfg-cache-expire_time" value="300">
+            </div>
+            <div class="form-group">
+              <label class="form-label">视频列表缓存时间（秒）</label>
+              <input class="form-input" type="number" id="cfg-video_cache-expire_time" value="43200">
+              <div class="form-hint">默认 43200 = 12小时</div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-cache-enabled" checked>
+              启用 GET 响应缓存
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Logging -->
+      <div class="tab-panel" id="tab-logging">
+        <div class="card">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">日志级别</label>
+              <select class="form-select" id="cfg-logging-level">
+                <option value="DEBUG">DEBUG</option>
+                <option value="INFO" selected>INFO</option>
+                <option value="WARNING">WARNING</option>
+                <option value="ERROR">ERROR</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">日志文件路径</label>
+              <input class="form-input" id="cfg-logging-file" value="logs/bot.log">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-logging-console" checked>
+              输出到控制台
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:12px;margin-top:8px">
+        <button class="btn btn-primary" onclick="saveConfig()">💾 保存配置</button>
+        <button class="btn btn-secondary" onclick="loadConfig()">🔄 重新加载</button>
+      </div>
+    </div>
+
+    <!-- Login -->
+    <div class="page" id="page-login">
+      <div class="page-title"><span class="icon">🔑</span>扫码登录</div>
+      <div class="card" style="max-width:500px">
+        <div class="card-title">微信扫码登录 B 站</div>
+        <p style="font-size:14px;color:var(--text2);margin-bottom:20px">
+          点击「生成二维码」后，使用 B站 App 扫码登录。Cookie 获取成功后会自动填入配置并保存。
+        </p>
+        <button class="btn btn-primary" id="btn-gen-qr" onclick="generateQR()">📱 生成二维码</button>
+        <div id="qr-container" style="margin-top:20px"></div>
+      </div>
+    </div>
+
+    <!-- History -->
+    <div class="page" id="page-history">
+      <div class="page-title"><span class="icon">📝</span>回复历史</div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+          <span id="history-total" style="color:var(--text2);font-size:14px">共 0 条记录</span>
+          <button class="btn btn-danger" onclick="clearHistory()" style="padding:7px 14px;font-size:13px">🗑 清空历史</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>用户</th>
+                <th>评论内容</th>
+                <th>回复内容</th>
+              </tr>
+            </thead>
+            <tbody id="history-tbody"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="history-pagination"></div>
+      </div>
+    </div>
+
+    <!-- Logs -->
+    <div class="page" id="page-logs">
+      <div class="page-title"><span class="icon">📋</span>实时日志</div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div style="display:flex;gap:8px;align-items:center">
+            <label class="form-check" style="font-size:13px">
+              <input type="checkbox" id="log-auto-scroll" checked> 自动滚动
+            </label>
+            <select class="form-select" id="log-filter" style="width:120px;padding:5px 8px;font-size:13px" onchange="filterLogs()">
+              <option value="">全部</option>
+              <option value="INFO">INFO</option>
+              <option value="WARNING">WARNING</option>
+              <option value="ERROR">ERROR</option>
+              <option value="DEBUG">DEBUG</option>
+            </select>
+          </div>
+          <button class="btn btn-secondary" onclick="clearLogs()" style="padding:7px 14px;font-size:13px">清空</button>
+        </div>
+        <div class="log-container" id="log-container"></div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+const socket = io();
+let currentPage = 'dashboard';
+let historyPage = 1;
+let allLogs = [];
+let configData = {};
+
+// ── Socket 事件 ──
+socket.on('connect', () => { console.log('WS connected'); });
+socket.on('bot_status', d => updateBotStatus(d.running));
+socket.on('stats', d => updateStats(d));
+socket.on('log', entry => appendLog(entry));
+socket.on('log_history', d => { allLogs = d.logs; renderLogs(); });
+socket.on('new_history', item => {
+  if (currentPage === 'history') loadHistory(historyPage);
+});
+socket.on('qr_status', d => {
+  const el = document.getElementById('qr-status');
+  if (el) {
+    el.textContent = d.message;
+    el.className = 'qr-status';
+    if (d.code === 0) el.style.color = 'var(--green)';
+    else if (d.code < 0 || d.code === 86038) el.style.color = 'var(--red)';
+    else el.style.color = 'var(--accent2)';
+  }
+});
+socket.on('qr_cookie', d => {
+  showToast('登录成功，正在保存配置...', 'success');
+  // 自动保存cookie到配置
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ bilibili: { cookie: d.cookie } })
+  }).then(r => r.json()).then(r => {
+    if (r.ok) {
+      showToast('Cookie 已保存到配置', 'success');
+      loadConfig();
+    }
+  });
+  document.getElementById('btn-gen-qr').disabled = false;
+});
+socket.on('video_list', d => {
+  document.getElementById('stat-videos').textContent = d.count;
+});
+
+// ── 页面导航 ──
+document.querySelectorAll('.nav-list a').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    const page = a.dataset.page;
+    navigateTo(page);
+  });
+});
+function navigateTo(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-list a').forEach(a => a.classList.remove('active'));
+  document.getElementById('page-' + page).classList.add('active');
+  document.querySelector(`[data-page="${page}"]`).classList.add('active');
+  currentPage = page;
+  if (page === 'history') loadHistory(1);
+  if (page === 'config') loadConfig();
+}
+
+// ── Tab 切换 ──
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tabId = btn.dataset.tab;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(tabId).classList.add('active');
+  });
+});
+
+// ── 统计更新 ──
+function updateStats(d) {
+  document.getElementById('stat-total').textContent = d.total_replied || 0;
+  document.getElementById('stat-processed').textContent = d.processed_count || 0;
+  document.getElementById('stat-videos').textContent = d.cached_videos || 0;
+  document.getElementById('info-start').textContent = d.start_time || '-';
+  document.getElementById('info-check').textContent = d.last_check || '-';
+  updateBotStatus(d.running);
+}
+function updateBotStatus(running) {
+  const dot = document.getElementById('nav-status-dot');
+  const statEl = document.getElementById('stat-status');
+  const btnStart = document.getElementById('btn-start');
+  const btnStop = document.getElementById('btn-stop');
+  if (running) {
+    dot.classList.add('running');
+    statEl.textContent = '运行中';
+    statEl.style.color = 'var(--green)';
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+  } else {
+    dot.classList.remove('running');
+    statEl.textContent = '已停止';
+    statEl.style.color = 'var(--red)';
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+  }
+}
+
+// ── 机器人控制 ──
+function botStart() {
+  fetch('/api/bot/start', {method:'POST'}).then(r=>r.json()).then(d=>{
+    showToast(d.message, d.ok ? 'success' : 'error');
+  });
+}
+function botStop() {
+  fetch('/api/bot/stop', {method:'POST'}).then(r=>r.json()).then(d=>{
+    showToast(d.message, d.ok ? 'success' : 'error');
+  });
+}
+function verifyLogin() {
+  const el = document.getElementById('verify-result');
+  el.innerHTML = '<span style="color:var(--text2)">验证中...</span>';
+  fetch('/api/bot/verify').then(r=>r.json()).then(d=>{
+    if (d.valid) {
+      const u = d.user_info || {};
+      el.innerHTML = `<div class="alert alert-success">✅ 登录有效 — ${u.name || ''} (UID: ${u.mid || ''})</div>`;
+    } else {
+      el.innerHTML = `<div class="alert alert-danger">❌ ${d.message}</div>`;
+    }
+  });
+}
+function clearCache() {
+  fetch('/api/cache/clear', {method:'POST'}).then(r=>r.json()).then(d=>{
+    showToast(d.message, d.ok ? 'success' : 'error');
+    document.getElementById('stat-videos').textContent = '0';
+  });
+}
+
+// ── 配置 ──
+function loadConfig() {
+  fetch('/api/config').then(r=>r.json()).then(d=>{
+    if (!d.ok) return;
+    configData = d.config;
+    const cfg = d.config;
+
+    // 填充所有字段
+    function set(id, val) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (el.type === 'checkbox') el.checked = !!val;
+      else el.value = val !== undefined && val !== null ? val : '';
+    }
+
+    const b = cfg.bilibili || {};
+    set('cfg-bilibili-cookie', b.cookie);
+    set('cfg-bilibili-refresh_token', b.refresh_token);
+    set('cfg-bilibili-uid', b.uid);
+    set('cfg-bilibili-check_interval', b.check_interval);
+    set('cfg-bilibili-cookie_refresh_interval', b.cookie_refresh_interval);
+    set('cfg-bilibili-max_comment_pages', b.max_comment_pages);
+    set('cfg-bilibili-max_video_pages', b.max_video_pages);
+    set('cfg-bilibili-auto_refresh_cookie', b.auto_refresh_cookie);
+
+    const ds = cfg.deepseek || {};
+    set('cfg-deepseek-api_key', ds.api_key);
+    set('cfg-deepseek-base_url', ds.base_url);
+    set('cfg-deepseek-model', ds.model);
+    set('cfg-deepseek-max_tokens', ds.max_tokens);
+    set('cfg-deepseek-temperature', ds.temperature);
+    set('cfg-deepseek-system_prompt', ds.system_prompt);
+
+    const r = cfg.reply || {};
+    set('cfg-reply-enabled', r.enabled);
+    set('cfg-reply-only_new', r.only_new);
+    set('cfg-reply-like_enabled', r.like_enabled);
+    set('cfg-reply-max_process', r.max_process);
+    set('cfg-reply-reply_delay', r.reply_delay);
+    set('cfg-reply-context_comments_count', r.context_comments_count);
+    set('cfg-reply-prefix', r.prefix);
+
+    const rl = cfg.rate_limit || {};
+    set('cfg-rate_limit-min_request_interval', rl.min_request_interval);
+    set('cfg-rate_limit-max_retries', rl.max_retries);
+    set('cfg-rate_limit-retry_delay', rl.retry_delay);
+
+    const ca = cfg.cache || {};
+    set('cfg-cache-expire_time', ca.expire_time);
+    set('cfg-cache-enabled', ca.enabled);
+    const vc = cfg.video_cache || {};
+    set('cfg-video_cache-expire_time', vc.expire_time);
+
+    const lg = cfg.logging || {};
+    set('cfg-logging-level', lg.level);
+    set('cfg-logging-file', lg.file);
+    set('cfg-logging-console', lg.console);
+  });
+}
+
+function saveConfig() {
+  function get(id) {
+    const el = document.getElementById(id);
+    if (!el) return undefined;
+    if (el.type === 'checkbox') return el.checked;
+    if (el.type === 'number') return el.value === '' ? 0 : Number(el.value);
+    return el.value;
+  }
+
+  const cfg = {
+    bilibili: {
+      cookie: get('cfg-bilibili-cookie'),
+      refresh_token: get('cfg-bilibili-refresh_token'),
+      uid: get('cfg-bilibili-uid'),
+      check_interval: get('cfg-bilibili-check_interval'),
+      cookie_refresh_interval: get('cfg-bilibili-cookie_refresh_interval'),
+      max_comment_pages: get('cfg-bilibili-max_comment_pages'),
+      max_video_pages: get('cfg-bilibili-max_video_pages'),
+      auto_refresh_cookie: get('cfg-bilibili-auto_refresh_cookie'),
+    },
+    deepseek: {
+      api_key: get('cfg-deepseek-api_key'),
+      base_url: get('cfg-deepseek-base_url'),
+      model: get('cfg-deepseek-model'),
+      max_tokens: get('cfg-deepseek-max_tokens'),
+      temperature: get('cfg-deepseek-temperature'),
+      system_prompt: get('cfg-deepseek-system_prompt'),
+    },
+    reply: {
+      enabled: get('cfg-reply-enabled'),
+      only_new: get('cfg-reply-only_new'),
+      like_enabled: get('cfg-reply-like_enabled'),
+      max_process: get('cfg-reply-max_process'),
+      reply_delay: get('cfg-reply-reply_delay'),
+      context_comments_count: get('cfg-reply-context_comments_count'),
+      prefix: get('cfg-reply-prefix'),
+    },
+    rate_limit: {
+      min_request_interval: get('cfg-rate_limit-min_request_interval'),
+      max_retries: get('cfg-rate_limit-max_retries'),
+      retry_delay: get('cfg-rate_limit-retry_delay'),
+    },
+    cache: {
+      expire_time: get('cfg-cache-expire_time'),
+      enabled: get('cfg-cache-enabled'),
+    },
+    video_cache: {
+      expire_time: get('cfg-video_cache-expire_time'),
+      cache_file: 'video_cache.json',
+    },
+    logging: {
+      level: get('cfg-logging-level'),
+      file: get('cfg-logging-file'),
+      console: get('cfg-logging-console'),
+    },
+  };
+
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(cfg),
+  }).then(r=>r.json()).then(d=>{
+    showToast(d.message, d.ok ? 'success' : 'error');
+  });
+}
+
+// ── 扫码登录 ──
+function generateQR() {
+  const btn = document.getElementById('btn-gen-qr');
+  btn.disabled = true;
+  const container = document.getElementById('qr-container');
+  container.innerHTML = '<span style="color:var(--text2)">生成中...</span>';
+  fetch('/api/qr/generate', {method:'POST'}).then(r=>r.json()).then(d=>{
+    if (d.ok) {
+      container.innerHTML = `
+        <div class="qr-box">
+          <img src="data:image/png;base64,${d.qr_image}" alt="二维码">
+          <div id="qr-status" class="qr-status" style="color:var(--accent2)">等待扫码...</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:8px">请使用 B站 App 扫码，有效期 3 分钟</div>
+        </div>`;
+    } else {
+      container.innerHTML = `<div class="alert alert-danger">${d.message}</div>`;
+      btn.disabled = false;
+    }
+  }).catch(e => {
+    container.innerHTML = `<div class="alert alert-danger">请求失败: ${e}</div>`;
+    btn.disabled = false;
+  });
+}
+
+// ── 历史记录 ──
+function loadHistory(page) {
+  historyPage = page;
+  fetch(`/api/history?page=${page}&per_page=20`).then(r=>r.json()).then(d=>{
+    if (!d.ok) return;
+    const tbody = document.getElementById('history-tbody');
+    document.getElementById('history-total').textContent = `共 ${d.total} 条记录`;
+    tbody.innerHTML = d.data.map(item => `
+      <tr>
+        <td style="white-space:nowrap;color:var(--text2)">${item.timestamp || ''}</td>
+        <td><span class="badge badge-blue">${escHtml(item.user || '')}</span></td>
+        <td style="max-width:240px;word-break:break-all">${escHtml(item.content || '')}</td>
+        <td style="max-width:240px;word-break:break-all;color:var(--green)">${escHtml(item.reply_content || '')}</td>
+      </tr>`).join('');
+    // 分页
+    const total = d.total;
+    const totalPages = Math.ceil(total / 20);
+    const pg = document.getElementById('history-pagination');
+    let pgHtml = '';
+    if (page > 1) pgHtml += `<button class="page-btn" onclick="loadHistory(${page-1})">‹</button>`;
+    for (let i = Math.max(1,page-2); i <= Math.min(totalPages,page+2); i++) {
+      pgHtml += `<button class="page-btn ${i===page?'active':''}" onclick="loadHistory(${i})">${i}</button>`;
+    }
+    if (page < totalPages) pgHtml += `<button class="page-btn" onclick="loadHistory(${page+1})">›</button>`;
+    pg.innerHTML = pgHtml;
+  });
+}
+function clearHistory() {
+  if (!confirm('确认清空所有历史记录？此操作不可撤销。')) return;
+  fetch('/api/history/clear', {method:'POST'}).then(r=>r.json()).then(d=>{
+    showToast(d.message, d.ok ? 'success' : 'error');
+    if (d.ok) loadHistory(1);
+  });
+}
+
+// ── 日志 ──
+function appendLog(entry) {
+  allLogs.push(entry);
+  if (allLogs.length > 1000) allLogs = allLogs.slice(-1000);
+  const filter = document.getElementById('log-filter').value;
+  if (!filter || entry.level === filter) {
+    const container = document.getElementById('log-container');
+    const div = document.createElement('div');
+    div.className = `log-entry ${entry.level}`;
+    div.innerHTML = `<span class="log-time">${entry.time}</span><span class="log-level">[${entry.level}]</span> ${escHtml(entry.msg)}`;
+    container.appendChild(div);
+    if (document.getElementById('log-auto-scroll').checked) {
+      container.scrollTop = container.scrollHeight;
+    }
+  }
+}
+function renderLogs() {
+  const container = document.getElementById('log-container');
+  const filter = document.getElementById('log-filter').value;
+  container.innerHTML = '';
+  allLogs.filter(e => !filter || e.level === filter).forEach(entry => {
+    const div = document.createElement('div');
+    div.className = `log-entry ${entry.level}`;
+    div.innerHTML = `<span class="log-time">${entry.time}</span><span class="log-level">[${entry.level}]</span> ${escHtml(entry.msg)}`;
+    container.appendChild(div);
+  });
+  container.scrollTop = container.scrollHeight;
+}
+function filterLogs() { renderLogs(); }
+function clearLogs() { allLogs = []; document.getElementById('log-container').innerHTML = ''; }
+
+// ── Toast ──
+function showToast(msg, type='info') {
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = msg;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 3500);
+}
+
+// ── 工具 ──
+function escHtml(str) {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── 初始化 ──
+(function init() {
+  loadConfig();
+  fetch('/api/bot/status').then(r=>r.json()).then(d => updateStats(d));
+})();
+</script>
+</body>
+</html>"""
+
+# ─────────────────────────────────────────────
+#  入口
+# ─────────────────────────────────────────────
+def main():
+    host = "127.0.0.1"
+    port = 5000
+    url = f"http://{host}:{port}"
+    print(f"""
+╔══════════════════════════════════════════╗
+║       B站评论自动回复机器人 Web UI        ║
+╠══════════════════════════════════════════╣
+║  访问地址: {url:<31}║
+║  按 Ctrl+C 停止服务                      ║
+╚══════════════════════════════════════════╝
+""")
+    # 初始化机器人（预加载）
+    get_bot()
+    # 延迟打开浏览器
+    threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+    socketio.run(app, host=host, port=port, debug=False, use_reloader=False, log_output=False)
 
 
 if __name__ == "__main__":

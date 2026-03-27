@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-B站评论自动回复机器人配置工具
-GUI界面用于编辑config.toml配置文件
-包含B站扫码登录获取Cookie功能
+[已弃用] B站评论自动回复机器人 - Tkinter GUI 配置工具
+此文件已被 main.py 中的 Web UI 完全替代。
+请直接运行 main.py，浏览器会自动打开 Web 界面。
 """
+# 此文件保留仅供参考，不再使用。
 
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext

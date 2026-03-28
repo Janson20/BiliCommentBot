@@ -2026,7 +2026,22 @@ def main():
 ╚══════════════════════════════════════════╝
 """)
     # 初始化机器人（预加载）
-    get_bot()
+    bot = get_bot()
+
+    # 检测配置是否完整，自动启动机器人
+    cfg = load_config()
+    cookie = cfg.get("bilibili", {}).get("cookie", "")
+    api_key = cfg.get("deepseek", {}).get("api_key", "")
+
+    if cookie and api_key:
+        print("检测到有效配置，自动启动机器人...")
+        if bot.start():
+            print("✓ 机器人已自动启动")
+        else:
+            print("✗ 机器人启动失败")
+    else:
+        print("提示: 请在 Web UI 中完成配置后启动")
+
     # 延迟打开浏览器
     threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     socketio.run(app, host=host, port=port, debug=False, use_reloader=False, log_output=False)

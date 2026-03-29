@@ -24,7 +24,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制项目文件
 COPY main.py .
-COPY prompt.txt .
 COPY config.example.toml .
 COPY docker-entrypoint.sh .
 

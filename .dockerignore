@@ -9,6 +9,7 @@ __pycache__/
 venv/
 env/
 ENV/
+.venv/
 
 # IDE 配置
 .vscode/
@@ -23,17 +24,17 @@ dist/
 *.egg-info/
 *.spec
 
-# 日志和缓存（本地）
-logs/
-*.log
-
-# 数据文件（本地）
+# 数据文件（这些文件在容器运行时挂载，构建时不需要）
 history.json
 bilibili_cookie.json
 video_cache.json
 
-# 配置文件（本地）
+# 配置文件（本地，使用挂载方式）
 config.toml
+
+# 日志（本地）
+logs/
+*.log
 
 # Git
 .git/
@@ -52,3 +53,8 @@ test.py
 .DS_Store
 Thumbs.db
 .codebuddy/
+.workbuddy/
+
+# .codebuddy 规则
+.codebuddy/
+

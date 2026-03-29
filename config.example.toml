@@ -73,6 +73,8 @@ reply_delay = 2
 context_comments_count = 10
 # 仅回复指定视频（留空则回复所有视频，填写BVID如BV1xx411c7mD则仅回复该视频）
 only_bvid = ""
+# 回复后是否点赞评论用户的最新视频
+like_user_video_enabled = false
 
 # 日志配置
 [logging]

@@ -82,6 +82,7 @@ DEFAULT_CONFIG = {
         "like_enabled": False,
         "context_comments_count": 0,
         "only_bvid": "",
+        "like_user_video_enabled": False,
     },
     "logging": {
         "level": "INFO",
@@ -782,6 +783,46 @@ class BiliCommentBot:
         except Exception:
             return False
 
+    def get_user_latest_video(self, uid: str) -> Optional[dict]:
+        """获取用户的最新视频"""
+        url = "https://api.bilibili.com/x/space/arc/search"
+        params = {"mid": uid, "ps": 1, "pn": 1, "order": "pubdate"}
+        try:
+            response = self.make_request_with_retry("GET", url, params=params, use_cache=False)
+            if not response:
+                return None
+            rt = self.decompress_response(response)
+            data = json.loads(rt)
+            if data.get("code") == 0:
+                videos = data.get("data", {}).get("list", {}).get("vlist", [])
+                if videos:
+                    return videos[0]
+            return None
+        except Exception as e:
+            self.logger.error(f"获取用户最新视频失败: {e}")
+            return None
+
+    def like_video(self, bvid: str) -> bool:
+        """点赞视频"""
+        if self.cookie_manager:
+            self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
+        if not self.csrf_token:
+            return False
+        aid = self.bvid_to_aid(bvid)
+        if not aid:
+            return False
+        url = "https://api.bilibili.com/x/web-interface/archive/like"
+        data = {"aid": aid, "like": 1, "csrf": self.csrf_token}
+        try:
+            response = self.make_request_with_retry("POST", url, data=data)
+            if not response:
+                return False
+            result = json.loads(self.decompress_response(response))
+            return result.get("code") == 0
+        except Exception as e:
+            self.logger.error(f"点赞视频失败: {e}")
+            return False
+
     def reply_comment(self, bvid: str, comment_id: str, content: str) -> bool:
         if self.cookie_manager:
             self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
@@ -876,6 +917,17 @@ class BiliCommentBot:
                         self.save_history(comment, reply)
                         processed_count += 1
                         self.stats["total_replied"] += 1
+                        
+                        # 点赞评论用户的最新视频
+                        if self.config["reply"].get("like_user_video_enabled", False):
+                            self.logger.info(f"正在点赞用户 {comment.user} 的最新视频...")
+                            latest_video = self.get_user_latest_video(comment.uid)
+                            if latest_video:
+                                if self.like_video(latest_video["bvid"]):
+                                    self.logger.info(f"已点赞用户 {comment.user} 的最新视频: {latest_video.get('title', 'N/A')}")
+                                else:
+                                    self.logger.warning(f"点赞用户 {comment.user} 的最新视频失败")
+                        
                         delay = self.config["reply"].get("reply_delay", 2)
                         if delay > 0:
                             time.sleep(delay)
@@ -1486,6 +1538,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               回复时同时点赞评论
             </label>
           </div>
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-reply-like_user_video_enabled">
+              回复后点赞评论用户的最新视频
+            </label>
+          </div>
           <div class="form-row">
             <div class="form-group">
               <label class="form-label">每次最多处理评论数</label>
@@ -1823,6 +1881,7 @@ function loadConfig() {
     set('cfg-reply-enabled', r.enabled);
     set('cfg-reply-only_new', r.only_new);
     set('cfg-reply-like_enabled', r.like_enabled);
+    set('cfg-reply-like_user_video_enabled', r.like_user_video_enabled);
     set('cfg-reply-max_process', r.max_process);
     set('cfg-reply-reply_delay', r.reply_delay);
     set('cfg-reply-context_comments_count', r.context_comments_count);
@@ -1879,6 +1938,7 @@ function saveConfig() {
       enabled: get('cfg-reply-enabled'),
       only_new: get('cfg-reply-only_new'),
       like_enabled: get('cfg-reply-like_enabled'),
+      like_user_video_enabled: get('cfg-reply-like_user_video_enabled'),
       max_process: get('cfg-reply-max_process'),
       reply_delay: get('cfg-reply-reply_delay'),
       context_comments_count: get('cfg-reply-context_comments_count'),

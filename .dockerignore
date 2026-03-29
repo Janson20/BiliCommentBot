@@ -1,0 +1,54 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 构建文件
+build/
+dist/
+*.egg-info/
+*.spec
+
+# 日志和缓存（本地）
+logs/
+*.log
+
+# 数据文件（本地）
+history.json
+bilibili_cookie.json
+video_cache.json
+
+# 配置文件（本地）
+config.toml
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# 文档
+*.md
+LICENSE
+
+# 测试文件
+test.py
+*.test.py
+
+# 其他
+.DS_Store
+Thumbs.db
+.codebuddy/

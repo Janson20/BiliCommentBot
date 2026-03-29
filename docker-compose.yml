@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  bilicomment:
+    build: .
+    container_name: bilicomment-bot
+    ports:
+      - "5000:5000"
+    volumes:
+      # 持久化配置文件
+      - ./config.toml:/app/config.toml
+      # 持久化数据文件
+      - ./data:/app/data
+      # 持久化日志
+      - ./logs:/app/logs
+      # 持久化历史记录
+      - ./history.json:/app/history.json
+      # 持久化 Cookie
+      - ./bilibili_cookie.json:/app/bilibili_cookie.json
+      # 持久化视频缓存
+      - ./video_cache.json:/app/video_cache.json
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

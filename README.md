@@ -25,13 +25,15 @@
 
 ## 快速开始
 
-### 1. 安装依赖
+### 方式一：本地运行
+
+#### 1. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 启动程序
+#### 2. 启动程序
 
 双击 `启动机器人.bat` 或执行：
 
@@ -40,6 +42,90 @@ python main.py
 ```
 
 程序会自动打开浏览器访问 `http://127.0.0.1:5000`，你可以通过 Web UI 完成所有配置和操作。
+
+### 方式二：Docker 部署
+
+#### 1. 使用 Docker Compose（推荐）
+
+首先创建配置文件：
+
+```bash
+cp config.docker.example.toml config.toml
+```
+
+或使用通用示例：
+
+```bash
+cp config.example.toml config.toml
+```
+
+编辑 `config.toml` 填入必要的配置（B站 Cookie、DeepSeek API Key 等）。
+
+启动服务：
+
+```bash
+docker-compose up -d
+```
+
+访问 `http://localhost:5000` 使用 Web UI。
+
+常用命令：
+
+```bash
+# 启动服务
+docker-compose up -d
+
+# 停止服务
+docker-compose down
+
+# 查看日志
+docker-compose logs -f
+
+# 重启服务
+docker-compose restart
+
+# 更新镜像并重启
+docker-compose up -d --build
+```
+
+#### 2. 使用 Docker 命令
+
+构建镜像：
+
+```bash
+docker build -t bilicomment-bot .
+```
+
+运行容器：
+
+```bash
+docker run -d \
+  --name bilicomment-bot \
+  -p 5000:5000 \
+  -v $(pwd)/config.toml:/app/config.toml \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/history.json:/app/history.json \
+  -v $(pwd)/bilibili_cookie.json:/app/bilibili_cookie.json \
+  -v $(pwd)/video_cache.json:/app/video_cache.json \
+  -e TZ=Asia/Shanghai \
+  bilicomment-bot
+```
+
+#### 3. Docker 数据持久化
+
+Docker 部署时会将以下目录/文件挂载到宿主机：
+
+| 容器路径 | 说明 |
+|---------|------|
+| `/app/config.toml` | 配置文件 |
+| `/app/data` | 数据目录 |
+| `/app/logs` | 日志目录 |
+| `/app/history.json` | 回复历史记录 |
+| `/app/bilibili_cookie.json` | Cookie 持久化文件 |
+| `/app/video_cache.json` | 视频列表缓存 |
+
+确保宿主机这些目录或文件有正确的权限。
 
 ### 3. 配置并启动
 
@@ -385,9 +471,33 @@ console = true
 
 ## 运行要求
 
-- Python 3.11+
+- Python 3.11+ （本地运行）
+- Docker & Docker Compose 20.10+ （Docker 部署）
 - 网络连接正常
 - 已安装依赖（见 requirements.txt）
+
+## Docker 环境配置
+
+在 Docker 环境中运行时，程序会自动检测并禁用浏览器自动打开功能。你需要手动访问 `http://<宿主机IP>:5000` 来使用 Web UI。
+
+### 远程访问配置
+
+如果需要在局域网内远程访问 Web UI，修改 `docker-compose.yml` 中的端口映射：
+
+```yaml
+ports:
+  - "0.0.0.0:5000:5000"  # 允许外部访问
+```
+
+然后通过 `http://<服务器IP>:5000` 访问。
+
+### 健康检查
+
+Docker 容器内置了健康检查，每 30 秒检查一次服务状态。可以通过以下命令查看健康状态：
+
+```bash
+docker inspect bilicomment-bot --format='{{.State.Health.Status}}'
+```
 
 ## 注意事项
 
@@ -397,7 +507,9 @@ console = true
 4. 回复延迟设置可以防止被 B 站限制
 5. 首次运行建议先测试，确认配置正确后再长期运行
 6. 启用点赞功能会增加 API 请求频率，请谨慎使用
-7. Web UI 默认运行在 `http://127.0.0.1:5000`，如需远程访问请修改代码中的 host 配置
+7. Web UI 默认运行在 `http://127.0.0.1:5000`，如需远程访问请修改代码中的 host 配置或使用 Docker 部署时绑定到 0.0.0.0
+8. Docker 部署时，确保宿主机有足够的磁盘空间用于日志和数据存储
+9. 首次 Docker 部署前，建议先在本地测试配置正确性
 
 ## 免责声明
 

@@ -2042,8 +2042,9 @@ def main():
     else:
         print("提示: 请在 Web UI 中完成配置后启动")
 
-    # 延迟打开浏览器
-    threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+    # 延迟打开浏览器（Docker 环境下不打开）
+    if os.getenv('DOCKER_ENV') != 'true':
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     socketio.run(app, host=host, port=port, debug=False, use_reloader=False, log_output=False)
 
 

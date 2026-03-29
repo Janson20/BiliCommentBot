@@ -7,12 +7,26 @@
 /.vscode
 /.git
 /.venv
+# 配置文件（敏感信息）
+config.toml
+
+# 数据文件
 history.json
 video_history.json
-/bili_scraper.py
-/prompt.txt
-test.py
+bilibili_cookie.json
+video_cache.json
+
+# 构建和打包
 /build
 /dist
 *.spec
+
+# 开发环境
+/.idea
+/.vscode
+/.venv
+.codebuddy/
+
+# 其他
 .workbuddy/
+prompt.txt

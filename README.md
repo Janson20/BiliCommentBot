@@ -238,6 +238,8 @@ Docker 部署时会将以下目录/文件挂载到宿主机：
 | `max_process` | 每次最多处理的评论数 | 10 |
 | `reply_delay` | 回复延迟（秒） | 3 |
 | `like_enabled` | 是否在回复前先点赞评论 | false |
+| `context_comments_count` | 上下文评论数（生成回复时参考前 N 条评论） | 0 |
+| `only_bvid` | 仅回复指定视频的 BVID（留空则回复所有视频） | - |
 
 ### 请求频率控制
 
@@ -305,6 +307,8 @@ only_new = true
 max_process = 10
 reply_delay = 3
 like_enabled = false
+context_comments_count = 0
+only_bvid = ""  # 留空则回复所有视频，填写 BVID（如 BV1xx411c7mD）则仅回复该视频
 
 [rate_limit]
 min_request_interval = 2.0

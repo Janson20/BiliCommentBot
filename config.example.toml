@@ -71,6 +71,8 @@ max_process = 10
 reply_delay = 2
 # 生成回复时使用前N条评论作为上下文（0表示不使用上下文）
 context_comments_count = 10
+# 仅回复指定视频（留空则回复所有视频，填写BVID如BV1xx411c7mD则仅回复该视频）
+only_bvid = ""
 
 # 日志配置
 [logging]

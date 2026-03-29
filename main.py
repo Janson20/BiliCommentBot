@@ -81,6 +81,7 @@ DEFAULT_CONFIG = {
         "reply_delay": 2,
         "like_enabled": False,
         "context_comments_count": 0,
+        "only_bvid": "",
     },
     "logging": {
         "level": "INFO",
@@ -833,10 +834,20 @@ class BiliCommentBot:
             self.refresh_cookie_if_needed()
         if not self.config["reply"].get("enabled", True):
             return
-        videos = self.get_video_list()
-        if not videos:
-            self.logger.warning("未获取到视频列表")
-            return
+        
+        # 检查是否仅回复指定视频
+        only_bvid = self.config["reply"].get("only_bvid", "").strip()
+        if only_bvid:
+            self.logger.info(f"仅回复指定视频: {only_bvid}")
+            # 创建单个视频列表
+            video_title = f"指定视频({only_bvid})"
+            videos = [{"bvid": only_bvid, "title": video_title, "desc": ""}]
+        else:
+            videos = self.get_video_list()
+            if not videos:
+                self.logger.warning("未获取到视频列表")
+                return
+        
         max_process = self.config["reply"].get("max_process", 10)
         context_count = self.config["reply"].get("context_comments_count", 0)
         processed_count = 0
@@ -1494,6 +1505,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             <label class="form-label">回复前缀（可留空）</label>
             <input class="form-input" id="cfg-reply-prefix" placeholder="">
           </div>
+          <div class="form-group">
+            <label class="form-label">仅回复指定视频（BVID）</label>
+            <input class="form-input" id="cfg-reply-only_bvid" placeholder="如：BV1xx411c7mD">
+            <div class="form-hint">留空则回复所有视频的评论；填写后仅回复该指定视频的评论</div>
+          </div>
         </div>
       </div>
 
@@ -1811,6 +1827,7 @@ function loadConfig() {
     set('cfg-reply-reply_delay', r.reply_delay);
     set('cfg-reply-context_comments_count', r.context_comments_count);
     set('cfg-reply-prefix', r.prefix);
+    set('cfg-reply-only_bvid', r.only_bvid);
 
     const rl = cfg.rate_limit || {};
     set('cfg-rate_limit-min_request_interval', rl.min_request_interval);
@@ -1866,6 +1883,7 @@ function saveConfig() {
       reply_delay: get('cfg-reply-reply_delay'),
       context_comments_count: get('cfg-reply-context_comments_count'),
       prefix: get('cfg-reply-prefix'),
+      only_bvid: get('cfg-reply-only_bvid'),
     },
     rate_limit: {
       min_request_interval: get('cfg-rate_limit-min_request_interval'),

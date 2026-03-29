@@ -786,61 +786,88 @@ class BiliCommentBot:
 
     def get_user_latest_video(self, uid: str) -> Optional[dict]:
         """获取用户的最新视频"""
+        self.logger.debug(f"开始获取用户 {uid} 的最新视频...")
         url = "https://api.bilibili.com/x/space/arc/search"
         params = {"mid": uid, "ps": 1, "pn": 1, "order": "pubdate"}
         try:
             response = self.make_request_with_retry("GET", url, params=params, use_cache=False)
             if not response:
+                self.logger.warning(f"获取用户 {uid} 视频列表失败：请求无响应")
                 return None
             rt = self.decompress_response(response)
             data = json.loads(rt)
             if data.get("code") == 0:
                 videos = data.get("data", {}).get("list", {}).get("vlist", [])
                 if videos:
-                    return videos[0]
+                    video = videos[0]
+                    self.logger.debug(f"成功获取用户 {uid} 的最新视频: {video.get('title', 'N/A')} ({video.get('bvid', 'N/A')})")
+                    return video
+                else:
+                    self.logger.warning(f"用户 {uid} 没有视频")
+            else:
+                self.logger.warning(f"获取用户 {uid} 视频列表失败: {data.get('message', '未知错误')}")
             return None
         except Exception as e:
-            self.logger.error(f"获取用户最新视频失败: {e}")
+            self.logger.error(f"获取用户 {uid} 最新视频异常: {e}", exc_info=True)
             return None
 
     def like_video(self, bvid: str) -> bool:
         """点赞视频"""
+        self.logger.debug(f"开始点赞视频: {bvid}")
         if self.cookie_manager:
             self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
         if not self.csrf_token:
+            self.logger.error("点赞视频失败: 未找到 CSRF token")
             return False
         aid = self.bvid_to_aid(bvid)
         if not aid:
+            self.logger.error(f"点赞视频失败: 无法转换 BVID {bvid} 到 AID")
             return False
+        self.logger.debug(f"视频 AID: {aid}")
         url = "https://api.bilibili.com/x/web-interface/archive/like"
         data = {"aid": aid, "like": 1, "csrf": self.csrf_token}
         try:
             response = self.make_request_with_retry("POST", url, data=data)
             if not response:
+                self.logger.warning(f"点赞视频失败: 请求无响应")
                 return False
             result = json.loads(self.decompress_response(response))
-            return result.get("code") == 0
+            code = result.get("code")
+            message = result.get("message", "未知错误")
+            if code == 0:
+                self.logger.info(f"✓ 成功点赞视频: {bvid}")
+                return True
+            else:
+                self.logger.warning(f"点赞视频失败: code={code}, message={message}")
+                return False
         except Exception as e:
-            self.logger.error(f"点赞视频失败: {e}")
+            self.logger.error(f"点赞视频异常: {e}", exc_info=True)
             return False
 
     def check_is_follower(self, follower_uid: str, following_uid: str) -> bool:
         """检查 follower_uid 是否关注了 following_uid"""
+        self.logger.debug(f"检查用户 {follower_uid} 是否关注 {following_uid}...")
         url = "https://api.bilibili.com/x/relation/same/followers"
         params = {"vmid": following_uid, "mid": follower_uid}
         try:
             response = self.make_request_with_retry("GET", url, params=params, use_cache=False)
             if not response:
+                self.logger.warning(f"检查粉丝关系失败: 请求无响应")
                 return False
             rt = self.decompress_response(response)
             data = json.loads(rt)
-            if data.get("code") == 0:
+            code = data.get("code")
+            if code == 0:
                 # 检查是否在关注列表中
                 following = data.get("data", {}).get("following", False)
+                self.logger.debug(f"用户 {follower_uid} 关注状态: {following}")
                 return following
+            else:
+                message = data.get("message", "未知错误")
+                self.logger.warning(f"检查粉丝关系失败: code={code}, message={message}")
             return False
         except Exception as e:
-            self.logger.error(f"检查粉丝关系失败: {e}")
+            self.logger.error(f"检查粉丝关系异常: {e}", exc_info=True)
             return False
 
     def reply_comment(self, bvid: str, comment_id: str, content: str) -> bool:
@@ -940,27 +967,40 @@ class BiliCommentBot:
                         
                         # 点赞评论用户的最新视频
                         if self.config["reply"].get("like_user_video_enabled", False):
-                            self.logger.info(f"正在点赞用户 {comment.user} 的最新视频...")
+                            self.logger.info(f"[点赞视频] 配置已启用，准备点赞用户 {comment.user} (UID: {comment.uid}) 的最新视频")
                             only_followers = self.config["reply"].get("like_user_video_only_followers", False)
+                            self.logger.debug(f"[点赞视频] 仅粉丝点赞限制: {only_followers}")
                             
                             if only_followers:
                                 # 检查是否是粉丝
                                 my_uid = self.config["bilibili"].get("uid")
+                                self.logger.debug(f"[点赞视频] 当前 UID: {my_uid}")
                                 if my_uid:
                                     is_follower = self.check_is_follower(comment.uid, my_uid)
                                     if not is_follower:
-                                        self.logger.info(f"用户 {comment.user} 未关注你，跳过点赞视频")
-                                        time.sleep(self.config["reply"].get("reply_delay", 2))
+                                        self.logger.info(f"[点赞视频] 用户 {comment.user} (UID: {comment.uid}) 未关注你，跳过点赞视频")
+                                        delay = self.config["reply"].get("reply_delay", 2)
+                                        if delay > 0:
+                                            time.sleep(delay)
                                         continue
+                                    else:
+                                        self.logger.info(f"[点赞视频] 用户 {comment.user} (UID: {comment.uid}) 是你的粉丝，继续点赞")
                                 else:
-                                    self.logger.warning("未配置 uid，无法检查粉丝关系，跳过点赞视频")
+                                    self.logger.warning("[点赞视频] 未配置 uid，无法检查粉丝关系，跳过点赞视频")
+                                    delay = self.config["reply"].get("reply_delay", 2)
+                                    if delay > 0:
+                                        time.sleep(delay)
+                                    continue
                             
                             latest_video = self.get_user_latest_video(comment.uid)
                             if latest_video:
+                                self.logger.info(f"[点赞视频] 获取到最新视频: {latest_video.get('title', 'N/A')} ({latest_video.get('bvid', 'N/A')})")
                                 if self.like_video(latest_video["bvid"]):
-                                    self.logger.info(f"已点赞用户 {comment.user} 的最新视频: {latest_video.get('title', 'N/A')}")
+                                    self.logger.info(f"[点赞视频] ✓ 成功点赞用户 {comment.user} 的最新视频")
                                 else:
-                                    self.logger.warning(f"点赞用户 {comment.user} 的最新视频失败")
+                                    self.logger.warning(f"[点赞视频] ✗ 点赞用户 {comment.user} 的最新视频失败")
+                            else:
+                                self.logger.warning(f"[点赞视频] 用户 {comment.user} 没有视频或获取失败")
                         
                         delay = self.config["reply"].get("reply_delay", 2)
                         if delay > 0:

@@ -45,7 +45,33 @@ python main.py
 
 ### 方式二：Docker 部署
 
-#### 1. 使用 Docker Compose（推荐）
+#### 1. 使用 Docker Hub 镜像（推荐）
+
+项目已发布至 [Docker Hub](https://hub.docker.com/r/janson20/bilicommentbot)，可以直接拉取使用：
+
+```bash
+docker pull janson20/bilicommentbot:latest
+```
+
+运行容器：
+
+```bash
+docker run -d \
+  --name bilicomment-bot \
+  -p 5000:5000 \
+  -v $(pwd)/config.toml:/app/config.toml \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/history.json:/app/history.json \
+  -v $(pwd)/bilibili_cookie.json:/app/bilibili_cookie.json \
+  -v $(pwd)/video_cache.json:/app/video_cache.json \
+  -e TZ=Asia/Shanghai \
+  janson20/bilicommentbot:latest
+```
+
+访问 `http://localhost:5000` 使用 Web UI。
+
+#### 2. 使用 Docker Compose
 
 首先创建配置文件：
 
@@ -59,7 +85,34 @@ cp config.docker.example.toml config.toml
 cp config.example.toml config.toml
 ```
 
-编辑 `config.toml` 填入必要的配置（B站 Cookie、DeepSeek API Key 等）。
+编辑 `docker-compose.yml`，修改镜像为 Docker Hub 镜像：
+
+```yaml
+version: '3.8'
+
+services:
+  bilicomment-bot:
+    image: janson20/bilicommentbot:latest
+    container_name: bilicomment-bot
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./config.toml:/app/config.toml
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./history.json:/app/history.json
+      - ./bilibili_cookie.json:/app/bilibili_cookie.json
+      - ./video_cache.json:/app/video_cache.json
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+```
 
 启动服务：
 
@@ -84,13 +137,14 @@ docker-compose logs -f
 # 重启服务
 docker-compose restart
 
-# 更新镜像并重启
-docker-compose up -d --build
+# 拉取最新镜像并重启
+docker-compose pull
+docker-compose up -d
 ```
 
-#### 2. 使用 Docker 命令
+#### 3. 本地构建镜像
 
-构建镜像：
+如需自行构建镜像：
 
 ```bash
 docker build -t bilicomment-bot .
@@ -111,6 +165,8 @@ docker run -d \
   -e TZ=Asia/Shanghai \
   bilicomment-bot
 ```
+
+> **提示**：推荐使用 Docker Hub 镜像 `janson20/bilicommentbot:latest`，无需自行构建。
 
 #### 3. Docker 数据持久化
 

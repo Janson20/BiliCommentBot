@@ -159,38 +159,19 @@ def clone_or_update_project():
     
     if os.path.exists(INSTALL_DIR):
         print(f"项目目录已存在: {INSTALL_DIR}")
-        
+
         # 检查是否是git仓库
         git_dir = os.path.join(INSTALL_DIR, ".git")
         if os.path.exists(git_dir):
-            print("正在检查项目更新...")
-            
-            # 获取远程更新
-            success, stdout, stderr = run_command(
-                f'"{python}" -c "import subprocess; subprocess.run([\'git\', \'fetch\'], cwd=r\'{INSTALL_DIR}\'])"',
+            print("正在更新项目...")
+            success, _, _ = run_command(
+                f'"{python}" -c "import subprocess; subprocess.run([\'git\', \'pull\'], cwd=r\'{INSTALL_DIR}\'])"',
                 check=False
             )
-            
-            # 检查是否有更新
-            success, stdout, stderr = run_command(
-                f'"{python}" -c "import subprocess; result = subprocess.run([\'git\', \'rev-list\', \'HEAD..origin/main\', \'--count\'], cwd=r\'{INSTALL_DIR}\', capture_output=True, text=True); print(result.stdout.strip())"',
-                check=False
-            )
-            
-            update_count = stdout.strip() if stdout else "0"
-            
-            if update_count.isdigit() and int(update_count) > 0:
-                print(f"发现 {update_count} 个更新，正在更新...")
-                success, _, _ = run_command(
-                    f'"{python}" -c "import subprocess; subprocess.run([\'git\', \'pull\', \'origin\', \'main\'], cwd=r\'{INSTALL_DIR}\'])"',
-                    check=False
-                )
-                if success:
-                    print("✓ 项目更新完成")
-                else:
-                    print("⚠ 更新失败，将使用现有版本")
+            if success:
+                print("✓ 项目更新完成")
             else:
-                print("✓ 项目已是最新版本")
+                print("⚠ 更新失败，将使用现有版本")
         else:
             print("⚠ 目录不是git仓库，将重新克隆...")
             shutil.rmtree(INSTALL_DIR, ignore_errors=True)

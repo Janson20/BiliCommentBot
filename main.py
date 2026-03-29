@@ -83,6 +83,7 @@ DEFAULT_CONFIG = {
         "context_comments_count": 0,
         "only_bvid": "",
         "like_user_video_enabled": False,
+        "like_user_video_only_followers": False,
     },
     "logging": {
         "level": "INFO",
@@ -823,6 +824,25 @@ class BiliCommentBot:
             self.logger.error(f"点赞视频失败: {e}")
             return False
 
+    def check_is_follower(self, follower_uid: str, following_uid: str) -> bool:
+        """检查 follower_uid 是否关注了 following_uid"""
+        url = "https://api.bilibili.com/x/relation/same/followers"
+        params = {"vmid": following_uid, "mid": follower_uid}
+        try:
+            response = self.make_request_with_retry("GET", url, params=params, use_cache=False)
+            if not response:
+                return False
+            rt = self.decompress_response(response)
+            data = json.loads(rt)
+            if data.get("code") == 0:
+                # 检查是否在关注列表中
+                following = data.get("data", {}).get("following", False)
+                return following
+            return False
+        except Exception as e:
+            self.logger.error(f"检查粉丝关系失败: {e}")
+            return False
+
     def reply_comment(self, bvid: str, comment_id: str, content: str) -> bool:
         if self.cookie_manager:
             self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
@@ -921,6 +941,20 @@ class BiliCommentBot:
                         # 点赞评论用户的最新视频
                         if self.config["reply"].get("like_user_video_enabled", False):
                             self.logger.info(f"正在点赞用户 {comment.user} 的最新视频...")
+                            only_followers = self.config["reply"].get("like_user_video_only_followers", False)
+                            
+                            if only_followers:
+                                # 检查是否是粉丝
+                                my_uid = self.config["bilibili"].get("uid")
+                                if my_uid:
+                                    is_follower = self.check_is_follower(comment.uid, my_uid)
+                                    if not is_follower:
+                                        self.logger.info(f"用户 {comment.user} 未关注你，跳过点赞视频")
+                                        time.sleep(self.config["reply"].get("reply_delay", 2))
+                                        continue
+                                else:
+                                    self.logger.warning("未配置 uid，无法检查粉丝关系，跳过点赞视频")
+                            
                             latest_video = self.get_user_latest_video(comment.uid)
                             if latest_video:
                                 if self.like_video(latest_video["bvid"]):
@@ -1544,6 +1578,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               回复后点赞评论用户的最新视频
             </label>
           </div>
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-reply-like_user_video_only_followers">
+              仅给粉丝视频点赞（仅点赞关注了你的用户的视频）
+            </label>
+          </div>
           <div class="form-row">
             <div class="form-group">
               <label class="form-label">每次最多处理评论数</label>
@@ -1882,6 +1922,7 @@ function loadConfig() {
     set('cfg-reply-only_new', r.only_new);
     set('cfg-reply-like_enabled', r.like_enabled);
     set('cfg-reply-like_user_video_enabled', r.like_user_video_enabled);
+    set('cfg-reply-like_user_video_only_followers', r.like_user_video_only_followers);
     set('cfg-reply-max_process', r.max_process);
     set('cfg-reply-reply_delay', r.reply_delay);
     set('cfg-reply-context_comments_count', r.context_comments_count);
@@ -1939,6 +1980,7 @@ function saveConfig() {
       only_new: get('cfg-reply-only_new'),
       like_enabled: get('cfg-reply-like_enabled'),
       like_user_video_enabled: get('cfg-reply-like_user_video_enabled'),
+      like_user_video_only_followers: get('cfg-reply-like_user_video_only_followers'),
       max_process: get('cfg-reply-max_process'),
       reply_delay: get('cfg-reply-reply_delay'),
       context_comments_count: get('cfg-reply-context_comments_count'),

@@ -78,6 +78,8 @@ like_enabled = false
 only_bvid = ""
 # 回复后是否点赞评论用户的最新视频
 like_user_video_enabled = false
+# 是否仅点赞关注了你的用户的视频（需要配置 uid）
+like_user_video_only_followers = false
 
 # 日志配置
 [logging]

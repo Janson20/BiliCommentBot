@@ -241,6 +241,7 @@ Docker 部署时会将以下目录/文件挂载到宿主机：
 | `context_comments_count` | 上下文评论数（生成回复时参考前 N 条评论） | 0 |
 | `only_bvid` | 仅回复指定视频的 BVID（留空则回复所有视频） | - |
 | `like_user_video_enabled` | 是否在回复后点赞评论用户的最新视频 | false |
+| `like_user_video_only_followers` | 是否仅点赞关注了你的用户的视频 | false |
 
 ### 请求频率控制
 
@@ -311,6 +312,7 @@ like_enabled = false
 context_comments_count = 0
 only_bvid = ""  # 留空则回复所有视频，填写 BVID（如 BV1xx411c7mD）则仅回复该视频
 like_user_video_enabled = false  # 回复后自动点赞评论用户的最新视频
+like_user_video_only_followers = false  # 仅点赞关注了你的用户的视频（需要配置 uid）
 
 [rate_limit]
 min_request_interval = 2.0

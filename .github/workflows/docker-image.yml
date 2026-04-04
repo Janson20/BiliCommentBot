@@ -1,47 +1,58 @@
 name: Build and Push Docker Image
 
-# 触发条件：当你推送到 main 分支 或者 推送一个以 'v' 开头的标签（如 v1.0.0）时，自动运行
 on:
   push:
     branches: [ "main" ]
     tags: [ "v*" ]
 
+# 为 GITHUB_TOKEN 授予写入 ghcr 的权限
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
-      # 1. 拉取你的代码
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. 设置 Docker 构建环境（支持多平台）
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 3. 登录到 Docker Hub（使用你刚才配置的密钥）
+      # 登录 Docker Hub
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      # 4. 为镜像生成标签（比如 latest、main、1.0.0 等）
+      # 登录 GitHub Container Registry
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 生成镜像标签（同时生成 Docker Hub 和 GHCR 的完整镜像名）
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # 重要：把 '你的用户名' 和 '你的镜像名' 改成你自己的
-          images: ${{ secrets.DOCKER_USERNAME }}/bilicommentbot
+          images: |
+            ${{ secrets.DOCKER_USERNAME }}/bilicommentbot
+            ghcr.io/${{ github.repository }}
           tags: |
-            type=ref,event=branch    # 如果是 main 分支触发，标签就是 main
-            type=semver,pattern={{version}}  # 如果是 v1.0.0 标签触发，标签就是 1.0.0
-            type=semver,pattern={{major}}.{{minor}}  # 额外生成一个 1.0 标签
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
-      # 5. 构建并推送镜像到 Docker Hub
+      # 构建并同时推送到两个仓库
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: .               # Dockerfile 所在的目录
-          push: true               # 推送镜像
+          context: .
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

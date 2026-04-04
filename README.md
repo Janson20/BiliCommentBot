@@ -1,10 +1,10 @@
 # B站评论自动回复机器人
 
-![GitHub语言](https://img.shields.io/github/languages/top/Janson20/BiliCommentBot) 
-![GitHub星数](https://img.shields.io/github/stars/Janson20/BiliCommentBot) 
-![Fork数](https://img.shields.io/github/forks/Janson20/BiliCommentBot) 
-![GitHub协议](https://img.shields.io/github/license/Janson20/BiliCommentBot) 
-![最新发行版](https://img.shields.io/github/v/release/Janson20/BiliCommentBot) 
+![GitHub语言](https://img.shields.io/github/languages/top/Janson20/BiliCommentBot)
+![GitHub星数](https://img.shields.io/github/stars/Janson20/BiliCommentBot)
+![Fork数](https://img.shields.io/github/forks/Janson20/BiliCommentBot)
+![GitHub协议](https://img.shields.io/github/license/Janson20/BiliCommentBot)
+![最新发行版](https://img.shields.io/github/v/release/Janson20/BiliCommentBot)
 ![议题](https://img.shields.io/github/issues/Janson20/BiliCommentBot)
 
 使用 DeepSeek API 自动回复 B 站账号下视频新增评论的 Python 机器人，**现已集成完整的 Web UI 管理界面**。
@@ -13,15 +13,19 @@
 
 - 🌐 **Web UI 管理界面**：启动后自动打开浏览器，所有功能通过图形界面操作
 - 🤖 自动监控 B 站视频的新增评论
+- 🎯 **仅回复指定视频**：支持配置只回复某个特定视频的评论
 - 🧠 使用 DeepSeek API 生成智能回复
-- 🔄 Cookie 自动刷新，避免登录过期
 - 👍 支持自动点赞评论（可选）
+- 🔥 **回复后点赞用户视频**：可自动点赞评论用户的最新视频
+- 👥 **仅给粉丝视频点赞**：支持只给关注了你的用户的视频点赞
+- 🔄 Cookie 自动刷新，避免登录过期
 - 📝 实时日志查看，支持按级别过滤
 - 📚 回复历史记录查看
 - 🛡️ 智能频率控制和重试机制
 - 💾 视频列表缓存，减少 API 请求
 - 📱 扫码登录获取 Cookie
 - ⚙️ 配置热更新，修改后立即生效无需重启
+- 📊 **详细的操作日志**：所有关键操作都有完整的日志记录
 
 ## 快速开始
 
@@ -67,6 +71,32 @@ docker run -d \
   -v $(pwd)/video_cache.json:/app/video_cache.json \
   -e TZ=Asia/Shanghai \
   janson20/bilicommentbot:latest
+```
+
+访问 `http://localhost:5000` 使用 Web UI。
+
+#### 2. 使用 GitHub Container Registry 镜像
+
+项目也已发布至 [GitHub Container Registry](https://ghcr.io/janson20/bilicommentbot)：
+
+```bash
+docker pull ghcr.io/janson20/bilicommentbot:main
+```
+
+运行容器：
+
+```bash
+docker run -d \
+  --name bilicomment-bot \
+  -p 5000:5000 \
+  -v $(pwd)/config.toml:/app/config.toml \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/history.json:/app/history.json \
+  -v $(pwd)/bilibili_cookie.json:/app/bilibili_cookie.json \
+  -v $(pwd)/video_cache.json:/app/video_cache.json \
+  -e TZ=Asia/Shanghai \
+  ghcr.io/janson20/bilicommentbot:main
 ```
 
 访问 `http://localhost:5000` 使用 Web UI。

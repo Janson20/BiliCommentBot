@@ -746,7 +746,7 @@ class BiliCommentBot:
         if context or video_context:
             ctx_text = video_context
             if context:
-                ctx_text += "前面的评论上下文：\n"
+                ctx_text += "前面的评论上下文（已回复的历史评论，仅供参考，请勿回复这些历史评论）：\n"
                 for i, c in enumerate(context, 1):
                     ctx_text += f"{i}. {c.user}: {c.content}\n"
             messages.append({"role": "user", "content": ctx_text.strip()})

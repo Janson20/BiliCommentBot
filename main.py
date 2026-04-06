@@ -616,8 +616,15 @@ class BiliCommentBot:
             if os.path.exists(self.video_cache_file):
                 with open(self.video_cache_file, "r", encoding="utf-8") as f:
                     cache_data = json.load(f)
-                self.cached_videos = cache_data.get("videos", [])
-                self.last_video_fetch_time = cache_data.get("fetch_time", 0)
+                if isinstance(cache_data, dict):
+                    self.cached_videos = cache_data.get("videos", [])
+                    self.last_video_fetch_time = cache_data.get("fetch_time", 0)
+                elif isinstance(cache_data, list):
+                    self.cached_videos = cache_data
+                    self.last_video_fetch_time = 0
+                else:
+                    self.cached_videos = []
+                    self.last_video_fetch_time = 0
                 age_h = (time.time() - self.last_video_fetch_time) / 3600
                 self.logger.info(f"加载视频缓存，缓存{age_h:.1f}小时，共{len(self.cached_videos)}个视频")
         except Exception as e:
@@ -2413,7 +2420,7 @@ def main():
     # 延迟打开浏览器（Docker 环境下不打开）
     if os.getenv('DOCKER_ENV') != 'true':
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    socketio.run(app, host=host, port=port, debug=False, use_reloader=False, log_output=False)
+    socketio.run(app, host=host, port=port, debug=False, use_reloader=False, log_output=False, allow_unsafe_werkzeug=True)
 
 
 if __name__ == "__main__":

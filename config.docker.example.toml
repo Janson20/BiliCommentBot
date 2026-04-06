@@ -1,5 +1,5 @@
 # Docker 部署配置示例
-# 将此文件重命名为 config.toml 并填入实际配置
+# 首次启动会自动从本文件创建 config.toml 到 data 目录
 
 # B站API配置
 [bilibili]
@@ -40,7 +40,7 @@ enabled = true
 [video_cache]
 # 视频列表缓存时间（秒），默认12小时（43200秒）
 expire_time = 43200
-# 缓存文件路径
+# 缓存文件路径（Docker模式下相对于 data 目录）
 cache_file = "video_cache.json"
 
 # DeepSeek API配置
@@ -81,11 +81,11 @@ like_user_video_enabled = false
 # 是否仅点赞关注了你的用户的视频（需要配置 uid）
 like_user_video_only_followers = false
 
-# 日志配置
+# 日志配置（Docker模式下日志存储在 data 目录下）
 [logging]
 # 日志级别（DEBUG, INFO, WARNING, ERROR）
 level = "INFO"
-# 日志文件路径
+# 日志文件路径（Docker模式下相对于 data 目录）
 file = "logs/bot.log"
 # 是否输出到控制台
 console = true

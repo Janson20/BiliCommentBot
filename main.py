@@ -36,10 +36,12 @@ from flask_socketio import SocketIO, emit
 # ─────────────────────────────────────────────
 #  全局常量
 # ─────────────────────────────────────────────
-CONFIG_FILE = "config.toml"
-HISTORY_FILE = "history.json"
-COOKIE_FILE = "bilibili_cookie.json"
-VIDEO_CACHE_FILE = "video_cache.json"
+DATA_DIR = os.environ.get("BILI_DATA_DIR", "")
+
+CONFIG_FILE = os.path.join(DATA_DIR, "config.toml") if DATA_DIR else "config.toml"
+HISTORY_FILE = os.path.join(DATA_DIR, "history.json") if DATA_DIR else "history.json"
+COOKIE_FILE = os.path.join(DATA_DIR, "bilibili_cookie.json") if DATA_DIR else "bilibili_cookie.json"
+VIDEO_CACHE_FILE = os.path.join(DATA_DIR, "video_cache.json") if DATA_DIR else "video_cache.json"
 
 DEFAULT_CONFIG = {
     "bilibili": {
@@ -369,7 +371,10 @@ class BiliCommentBot:
         vc = self.config.get("video_cache", {})
         self.cached_videos: List[dict] = []
         self.last_video_fetch_time = 0
-        self.video_cache_file = vc.get("cache_file", VIDEO_CACHE_FILE)
+        cache_file_path = vc.get("cache_file", "video_cache.json")
+        if DATA_DIR and not os.path.isabs(cache_file_path):
+            cache_file_path = os.path.join(DATA_DIR, cache_file_path)
+        self.video_cache_file = cache_file_path
         self.video_cache_expire_time = vc.get("expire_time", 43200)
         self.load_video_cache()
 
@@ -1116,6 +1121,8 @@ def _setup_logger(cfg: dict) -> logging.Logger:
     log_cfg = cfg.get("logging", {})
     level = getattr(logging, log_cfg.get("level", "INFO").upper(), logging.INFO)
     log_file = log_cfg.get("file", "logs/bot.log")
+    if DATA_DIR and not os.path.isabs(log_file):
+        log_file = os.path.join(DATA_DIR, log_file)
     log_dir = os.path.dirname(log_file)
     if log_dir and not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)

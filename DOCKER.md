@@ -17,15 +17,21 @@ git clone https://github.com/Janson20/BiliCommentBot.git
 cd BiliCommentBot
 ```
 
-### 2. 创建配置文件
+### 2. 启动容器
 
 ```bash
-cp config.example.toml config.toml
+docker-compose up -d
 ```
+
+首次启动时，容器会自动在 `./data` 目录下创建所有必要的文件。
 
 ### 3. 编辑配置文件
 
-编辑 `config.toml`，填入必要的配置：
+```bash
+vim ./data/config.toml
+```
+
+填入必要的配置：
 
 ```toml
 [bilibili]
@@ -72,29 +78,40 @@ file = "logs/bot.log"
 console = true
 ```
 
-> **提示**：如果你还没有获取 Cookie，可以先启动容器，然后在 Web UI 的「登录」页面扫码登录获取。
+> **提示**：如果你还没有获取 Cookie，可以先启动容器，然后在 Web UI 的「登录」页面扫码登录获取。修改配置后在 Web UI 中保存即可热更新，无需重启容器。
 
-### 4. 启动容器
-
-```bash
-docker-compose up -d
-```
-
-### 5. 访问 Web UI
+### 4. 访问 Web UI
 
 打开浏览器访问：`http://localhost:5000`
 
 如果是在服务器上部署，访问：`http://<服务器IP>:5000`
+
+## 数据目录结构
+
+所有配置和数据文件统一存储在 `./data` 目录下，只需挂载一个卷即可实现数据持久化：
+
+```
+./data/
+├── config.toml              # 配置文件
+├── history.json             # 回复历史记录
+├── bilibili_cookie.json     # Cookie 持久化文件
+├── video_cache.json         # 视频列表缓存
+└── logs/
+    └── bot.log              # 程序运行日志
+```
 
 ## 常用命令
 
 ### 查看日志
 
 ```bash
-# 实时查看容器日志
+# 查看应用日志（容器标准输出）
 docker-compose logs -f
 
-# 查看最近 100 行日志
+# 查看持久化日志文件
+cat ./data/logs/bot.log
+
+# 查看最近 100 行容器日志
 docker-compose logs --tail=100
 ```
 
@@ -136,18 +153,23 @@ docker-compose exec bilicomment-bot /bin/bash
 
 ## 数据持久化
 
-Docker Compose 配置会自动挂载以下文件和目录：
+Docker 部署时只需挂载一个 `./data` 目录即可持久化所有数据：
 
 | 宿主机路径 | 容器路径 | 说明 |
 |-----------|---------|------|
-| `./config.toml` | `/app/config.toml` | 配置文件 |
-| `./data` | `/app/data` | 数据目录 |
-| `./logs` | `/app/logs` | 日志目录 |
-| `./history.json` | `/app/history.json` | 回复历史 |
-| `./bilibili_cookie.json` | `/app/bilibili_cookie.json` | Cookie 文件 |
-| `./video_cache.json` | `/app/video_cache.json` | 视频缓存 |
+| `./data` | `/app/data` | 所有配置和数据 |
 
-这些文件和目录会被持久化到宿主机，即使删除容器也不会丢失数据。
+`./data` 目录包含：
+
+| 文件/目录 | 说明 |
+|----------|------|
+| `data/config.toml` | 配置文件 |
+| `data/history.json` | 回复历史 |
+| `data/bilibili_cookie.json` | Cookie 文件 |
+| `data/video_cache.json` | 视频缓存 |
+| `data/logs/` | 日志目录 |
+
+这些文件会被持久化到宿主机，即使删除容器也不会丢失数据。
 
 ## 健康检查
 
@@ -192,7 +214,10 @@ environment:
   - TZ=Asia/Shanghai          # 时区设置
   - PYTHONUNBUFFERED=1        # Python 输出缓冲
   - DOCKER_ENV=true           # Docker 环境标识
+  - BILI_DATA_DIR=/app/data   # 数据目录（默认 /app/data）
 ```
+
+`BILI_DATA_DIR` 环境变量控制所有配置和数据文件的存储位置。默认为 `/app/data`，对应宿主机挂载的 `./data` 目录。
 
 ## 故障排除
 
@@ -203,7 +228,7 @@ environment:
 docker-compose logs bilicomment-bot
 
 # 检查配置文件语法
-python3 -c "import toml; toml.load('config.toml')"
+docker-compose exec bilicomment-bot python3 -c "import toml; toml.load('/app/data/config.toml')"
 ```
 
 ### Web UI 无法访问
@@ -215,7 +240,7 @@ python3 -c "import toml; toml.load('config.toml')"
 
 ### 配置修改不生效
 
-修改配置后需要重启容器：
+通过 Web UI 修改配置会自动热更新，无需重启。如果直接编辑 `./data/config.toml` 文件，需要重启容器：
 
 ```bash
 docker-compose restart
@@ -236,9 +261,8 @@ docker system df
 如果遇到文件权限问题，可以设置：
 
 ```bash
-# 设置正确的文件权限
-chmod 644 config.toml
-chmod 755 logs data
+chmod -R 755 ./data
+chmod 644 ./data/config.toml
 ```
 
 ## 生产环境部署建议
@@ -290,14 +314,14 @@ Docker Compose 已配置 `restart: unless-stopped`，确保容器异常退出时
 
 ### 5. 备份策略
 
-定期备份配置和数据：
+定期备份数据目录：
 
 ```bash
 #!/bin/bash
 # backup.sh
 BACKUP_DIR="/path/to/backup"
 DATE=$(date +%Y%m%d_%H%M%S)
-tar -czf $BACKUP_DIR/bilicomment_$DATE.tar.gz config.toml history.json bilibili_cookie.json video_cache.json logs/
+tar -czf $BACKUP_DIR/bilicomment_$DATE.tar.gz ./data/
 ```
 
 ## 性能优化
@@ -321,7 +345,7 @@ services:
 
 ## 安全建议
 
-1. **不要提交敏感信息**：确保 `config.toml` 不包含在 Git 仓库中
+1. **不要提交敏感信息**：确保 `./data/config.toml` 不包含在 Git 仓库中
 2. **使用强密码**：如果启用了 Web UI 的认证功能，使用强密码
 3. **定期更新**：定期更新 Docker 镜像和依赖
 4. **限制访问**：使用防火墙限制 Web UI 的访问来源
@@ -329,4 +353,5 @@ services:
 
 ## 更新日志
 
+- 2026-04-06: 重构为单卷挂载，所有配置和数据统一存储在 `./data` 目录
 - 2026-03-29: 添加 Docker 部署支持

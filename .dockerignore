@@ -24,15 +24,16 @@ dist/
 *.egg-info/
 *.spec
 
-# 数据文件（这些文件在容器运行时挂载，构建时不需要）
+# 数据文件（通过 data 卷挂载，构建时不需要）
+data/
 history.json
 bilibili_cookie.json
 video_cache.json
 
-# 配置文件（本地，使用挂载方式）
+# 配置文件（通过 data 卷挂载）
 config.toml
 
-# 日志（本地）
+# 日志
 logs/
 *.log
 
@@ -54,7 +55,3 @@ test.py
 Thumbs.db
 .codebuddy/
 .workbuddy/
-
-# .codebuddy 规则
-.codebuddy/
-

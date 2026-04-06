@@ -59,21 +59,20 @@ python main.py
 docker pull janson20/bilicommentbot:latest
 ```
 
-运行容器：
+运行容器（所有数据存储在 `./data` 目录，只需挂载一个卷）：
 
 ```bash
+mkdir -p ./data
 docker run -d \
   --name bilicomment-bot \
   -p 5000:5000 \
-  -v $(pwd)/config.toml:/app/config.toml \
   -v $(pwd)/data:/app/data \
-  -v $(pwd)/logs:/app/logs \
-  -v $(pwd)/history.json:/app/history.json \
-  -v $(pwd)/bilibili_cookie.json:/app/bilibili_cookie.json \
-  -v $(pwd)/video_cache.json:/app/video_cache.json \
   -e TZ=Asia/Shanghai \
+  -e BILI_DATA_DIR=/app/data \
   janson20/bilicommentbot:latest
 ```
+
+首次启动会自动在 `./data` 目录下生成配置文件，之后编辑 `./data/config.toml` 填入配置即可。
 
 访问 `http://localhost:5000` 使用 Web UI。
 
@@ -88,34 +87,19 @@ docker pull ghcr.io/janson20/bilicommentbot:main
 运行容器：
 
 ```bash
+mkdir -p ./data
 docker run -d \
   --name bilicomment-bot \
   -p 5000:5000 \
-  -v $(pwd)/config.toml:/app/config.toml \
   -v $(pwd)/data:/app/data \
-  -v $(pwd)/logs:/app/logs \
-  -v $(pwd)/history.json:/app/history.json \
-  -v $(pwd)/bilibili_cookie.json:/app/bilibili_cookie.json \
-  -v $(pwd)/video_cache.json:/app/video_cache.json \
   -e TZ=Asia/Shanghai \
+  -e BILI_DATA_DIR=/app/data \
   ghcr.io/janson20/bilicommentbot:main
 ```
 
 访问 `http://localhost:5000` 使用 Web UI。
 
-#### 2. 使用 Docker Compose
-
-首先创建配置文件：
-
-```bash
-cp config.docker.example.toml config.toml
-```
-
-或使用通用示例：
-
-```bash
-cp config.example.toml config.toml
-```
+#### 3. 使用 Docker Compose（推荐）
 
 编辑 `docker-compose.yml`，修改镜像为 Docker Hub 镜像：
 
@@ -123,27 +107,23 @@ cp config.example.toml config.toml
 version: '3.8'
 
 services:
-  bilicomment-bot:
+  bilicomment:
     image: janson20/bilicommentbot:latest
     container_name: bilicomment-bot
     ports:
       - "5000:5000"
     volumes:
-      - ./config.toml:/app/config.toml
       - ./data:/app/data
-      - ./logs:/app/logs
-      - ./history.json:/app/history.json
-      - ./bilibili_cookie.json:/app/bilibili_cookie.json
-      - ./video_cache.json:/app/video_cache.json
     environment:
       - TZ=Asia/Shanghai
+      - BILI_DATA_DIR=/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/api/status"]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 40s
 ```
 
 启动服务：
@@ -174,7 +154,7 @@ docker-compose pull
 docker-compose up -d
 ```
 
-#### 3. 本地构建镜像
+#### 4. 本地构建镜像
 
 如需自行构建镜像：
 
@@ -185,35 +165,31 @@ docker build -t bilicomment-bot .
 运行容器：
 
 ```bash
+mkdir -p ./data
 docker run -d \
   --name bilicomment-bot \
   -p 5000:5000 \
-  -v $(pwd)/config.toml:/app/config.toml \
   -v $(pwd)/data:/app/data \
-  -v $(pwd)/logs:/app/logs \
-  -v $(pwd)/history.json:/app/history.json \
-  -v $(pwd)/bilibili_cookie.json:/app/bilibili_cookie.json \
-  -v $(pwd)/video_cache.json:/app/video_cache.json \
   -e TZ=Asia/Shanghai \
+  -e BILI_DATA_DIR=/app/data \
   bilicomment-bot
 ```
 
 > **提示**：推荐使用 Docker Hub 镜像 `janson20/bilicommentbot:latest`，无需自行构建。
 
-#### 3. Docker 数据持久化
+#### 5. Docker 数据目录结构
 
-Docker 部署时会将以下目录/文件挂载到宿主机：
+所有配置和数据文件统一存储在 `./data` 目录下，只需挂载一个卷：
 
-| 容器路径 | 说明 |
-|---------|------|
-| `/app/config.toml` | 配置文件 |
-| `/app/data` | 数据目录 |
-| `/app/logs` | 日志目录 |
-| `/app/history.json` | 回复历史记录 |
-| `/app/bilibili_cookie.json` | Cookie 持久化文件 |
-| `/app/video_cache.json` | 视频列表缓存 |
-
-确保宿主机这些目录或文件有正确的权限。
+```
+./data/
+├── config.toml              # 配置文件
+├── history.json             # 回复历史记录
+├── bilibili_cookie.json     # Cookie 持久化文件
+├── video_cache.json         # 视频列表缓存
+└── logs/
+    └── bot.log              # 程序运行日志
+```
 
 ### 3. 配置并启动
 
@@ -564,13 +540,15 @@ console = true
 |------|------|
 | `main.py` | 主程序，包含 Web UI 和机器人核心逻辑 |
 | `启动机器人.bat` | Windows 启动脚本 |
-| `config.toml` | 配置文件（首次运行自动生成） |
-| `config.example.toml` | 配置文件示例 |
+| `config.toml` | 配置文件（本地运行，首次运行自动生成） |
+| `config.example.toml` | 配置文件示例（本地） |
+| `config.docker.example.toml` | Docker 配置文件示例 |
+| `data/` | Docker 模式数据目录（包含配置、历史、缓存、日志） |
 | `requirements.txt` | Python 依赖 |
-| `history.json` | 回复历史记录 |
-| `bilibili_cookie.json` | Cookie 持久化文件 |
-| `video_cache.json` | 视频列表缓存 |
-| `logs/bot.log` | 程序运行日志 |
+| `history.json` | 回复历史记录（本地运行） |
+| `bilibili_cookie.json` | Cookie 持久化文件（本地运行） |
+| `video_cache.json` | 视频列表缓存（本地运行） |
+| `logs/bot.log` | 程序运行日志（本地运行） |
 
 ## 运行要求
 
@@ -611,8 +589,8 @@ docker inspect bilicomment-bot --format='{{.State.Health.Status}}'
 5. 首次运行建议先测试，确认配置正确后再长期运行
 6. 启用点赞功能会增加 API 请求频率，请谨慎使用
 7. Web UI 默认运行在 `http://127.0.0.1:5000`，如需远程访问请修改代码中的 host 配置或使用 Docker 部署时绑定到 0.0.0.0
-8. Docker 部署时，确保宿主机有足够的磁盘空间用于日志和数据存储
-9. 首次 Docker 部署前，建议先在本地测试配置正确性
+8. Docker 部署时，所有数据存储在 `./data` 目录，确保宿主机有足够的磁盘空间
+9. 首次 Docker 部署时，容器会自动在 `./data` 目录下生成配置文件，编辑 `./data/config.toml` 即可
 
 ## 免责声明
 

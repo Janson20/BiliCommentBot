@@ -3,25 +3,17 @@ version: '3.8'
 services:
   bilicomment:
     build: .
+    image: janson20/bilicommentbot:latest
     container_name: bilicomment-bot
     ports:
       - "5000:5000"
     volumes:
-      # 持久化配置文件
-      - ./config.toml:/app/config.toml
-      # 持久化数据文件
+      # 所有配置和数据文件统一存储在 ./data 目录，只需挂载一个卷
       - ./data:/app/data
-      # 持久化日志
-      - ./logs:/app/logs
-      # 持久化历史记录
-      - ./history.json:/app/history.json
-      # 持久化 Cookie
-      - ./bilibili_cookie.json:/app/bilibili_cookie.json
-      # 持久化视频缓存
-      - ./video_cache.json:/app/video_cache.json
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
+      - BILI_DATA_DIR=/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/"]

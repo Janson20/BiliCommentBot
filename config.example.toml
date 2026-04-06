@@ -86,3 +86,10 @@ level = "INFO"
 file = "logs/bot.log"
 # 是否输出到控制台
 console = true
+
+# 安全配置
+[auth]
+# 是否启用登录密码保护
+enabled = false
+# 登录密码（SHA-256哈希值，通过Web UI设置）
+password = ""

@@ -90,6 +90,10 @@ DEFAULT_CONFIG = {
         "file": "logs/bot.log",
         "console": True,
     },
+    "auth": {
+        "enabled": False,
+        "password": "",
+    },
 }
 
 # ─────────────────────────────────────────────
@@ -1249,6 +1253,74 @@ def api_cache_clear():
     return jsonify({"ok": True, "message": "视频缓存已清除"})
 
 
+@app.route("/api/auth/login", methods=["POST"])
+def api_auth_login():
+    """验证登录密码"""
+    data = request.get_json()
+    password = data.get("password", "") if data else ""
+    cfg = load_config()
+    auth_cfg = cfg.get("auth", {})
+    stored_hash = auth_cfg.get("password", "")
+    if not auth_cfg.get("enabled", False) or not stored_hash:
+        return jsonify({"ok": True, "message": "未启用密码保护"})
+    pwd_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    if pwd_hash == stored_hash:
+        return jsonify({"ok": True, "message": "验证成功"})
+    return jsonify({"ok": False, "message": "密码错误"})
+
+
+@app.route("/api/auth/password", methods=["POST"])
+def api_auth_password():
+    """修改密码"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"ok": False, "message": "无效数据"})
+    old_password = data.get("old_password", "")
+    new_password = data.get("new_password", "")
+    action = data.get("action", "")
+
+    cfg = load_config()
+    auth_cfg = cfg.get("auth", {})
+    stored_hash = auth_cfg.get("password", "")
+
+    if action == "generate":
+        # 随机生成密码
+        import string
+        chars = string.ascii_letters + string.digits + "!@#$%^&*"
+        new_password = "".join(random.choice(chars) for _ in range(16))
+        pwd_hash = hashlib.sha256(new_password.encode("utf-8")).hexdigest()
+        cfg.setdefault("auth", {})["password"] = pwd_hash
+        cfg.setdefault("auth", {})["enabled"] = True
+        if save_config(cfg):
+            return jsonify({"ok": True, "message": "密码已生成", "password": new_password})
+        return jsonify({"ok": False, "message": "保存失败"})
+
+    if action == "change":
+        # 修改密码（需要旧密码验证，除非之前没有密码）
+        if stored_hash:
+            old_hash = hashlib.sha256(old_password.encode("utf-8")).hexdigest()
+            if old_hash != stored_hash:
+                return jsonify({"ok": False, "message": "旧密码错误"})
+        if not new_password or len(new_password) < 4:
+            return jsonify({"ok": False, "message": "新密码长度不能少于4位"})
+        pwd_hash = hashlib.sha256(new_password.encode("utf-8")).hexdigest()
+        cfg.setdefault("auth", {})["password"] = pwd_hash
+        cfg.setdefault("auth", {})["enabled"] = True
+        if save_config(cfg):
+            return jsonify({"ok": True, "message": "密码已修改"})
+        return jsonify({"ok": False, "message": "保存失败"})
+
+    if action == "clear":
+        # 清除密码
+        cfg.setdefault("auth", {})["password"] = ""
+        cfg.setdefault("auth", {})["enabled"] = False
+        if save_config(cfg):
+            return jsonify({"ok": True, "message": "密码保护已关闭"})
+        return jsonify({"ok": False, "message": "保存失败"})
+
+    return jsonify({"ok": False, "message": "未知操作"})
+
+
 @app.route("/api/videos", methods=["GET"])
 def api_videos():
     bot = get_bot()
@@ -1436,10 +1508,30 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     .main { margin-left: 60px; padding: 16px; }
     .form-row, .form-row-3 { grid-template-columns: 1fr; }
   }
+  /* Auth Gate */
+  .auth-gate { position: fixed; inset: 0; z-index: 9999; background: var(--bg); display: flex; align-items: center; justify-content: center; }
+  .auth-box { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 40px; width: 380px; box-shadow: 0 8px 32px rgba(0,0,0,.15); }
 </style>
 </head>
 <body>
 <div id="toast-container"></div>
+<!-- Auth Gate -->
+<div class="auth-gate" id="auth-gate" style="display:none">
+  <div class="auth-box">
+    <div style="text-align:center;margin-bottom:24px">
+      <div style="font-size:48px;margin-bottom:8px">🔒</div>
+      <div style="font-size:20px;font-weight:600">BiliBot 访问验证</div>
+      <div style="font-size:14px;color:var(--text2);margin-top:4px">请输入登录密码以继续</div>
+    </div>
+    <div style="position:relative">
+      <input class="form-input" id="auth-password-input" type="password" placeholder="请输入密码" 
+        style="width:100%;padding:12px 16px;font-size:16px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text)"
+        onkeydown="if(event.key==='Enter')submitAuth()">
+      <button class="btn btn-primary" onclick="submitAuth()" style="position:absolute;right:4px;top:50%;transform:translateY(-50%)">进入</button>
+    </div>
+    <div id="auth-error" style="margin-top:12px;text-align:center;color:var(--danger);font-size:14px"></div>
+  </div>
+</div>
 <div class="app">
   <!-- Sidebar -->
   <aside class="sidebar">
@@ -1512,6 +1604,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <button class="tab-btn" data-tab="tab-rate">频率控制</button>
         <button class="tab-btn" data-tab="tab-cache">缓存</button>
         <button class="tab-btn" data-tab="tab-logging">日志</button>
+        <button class="tab-btn" data-tab="tab-auth">安全</button>
       </div>
 
       <!-- B站 -->
@@ -1721,6 +1814,27 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
       </div>
 
+      <div class="tab-panel" id="tab-auth">
+        <div class="card">
+          <div class="card-title">登录密码保护</div>
+          <p style="font-size:14px;color:var(--text2);margin-bottom:20px">
+            启用后，访问 Web UI 时需要输入密码才能进入。密码以 SHA-256 哈希存储在配置文件中。
+          </p>
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-auth-enabled">
+              启用登录密码保护
+            </label>
+          </div>
+          <div id="auth-actions" style="margin-top:16px;display:flex;flex-wrap:wrap;gap:10px">
+            <button class="btn btn-primary" onclick="changePassword()">🔑 修改密码</button>
+            <button class="btn btn-secondary" onclick="generatePassword()">🎲 随机生成密码</button>
+            <button class="btn btn-danger" onclick="clearPassword()">🗑 清除密码</button>
+          </div>
+          <div id="auth-result" style="margin-top:12px"></div>
+        </div>
+      </div>
+
       <div style="display:flex;gap:12px;margin-top:8px">
         <button class="btn btn-primary" onclick="saveConfig()">💾 保存配置</button>
         <button class="btn btn-secondary" onclick="loadConfig()">🔄 重新加载</button>
@@ -1924,6 +2038,85 @@ function clearCache() {
   });
 }
 
+// ── 密码保护 ──
+function checkAuthGate() {
+  fetch('/api/config').then(r=>r.json()).then(d=>{
+    if (!d.ok) return;
+    const auth = d.config.auth || {};
+    if (auth.enabled && auth.password) {
+      document.getElementById('auth-gate').style.display = 'flex';
+      document.getElementById('auth-password-input').focus();
+    }
+  });
+}
+
+function submitAuth() {
+  const pwd = document.getElementById('auth-password-input').value;
+  if (!pwd) { document.getElementById('auth-error').textContent = '请输入密码'; return; }
+  fetch('/api/auth/login', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({password: pwd})
+  }).then(r=>r.json()).then(d=>{
+    if (d.ok) {
+      document.getElementById('auth-gate').style.display = 'none';
+      document.getElementById('auth-error').textContent = '';
+    } else {
+      document.getElementById('auth-error').textContent = d.message;
+      document.getElementById('auth-password-input').value = '';
+      document.getElementById('auth-password-input').focus();
+    }
+  });
+}
+
+function changePassword() {
+  const oldPwd = prompt('请输入旧密码:');
+  if (oldPwd === null) return;
+  const newPwd = prompt('请输入新密码（至少4位）:');
+  if (newPwd === null) return;
+  fetch('/api/auth/password', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({action: 'change', old_password: oldPwd, new_password: newPwd})
+  }).then(r=>r.json()).then(d=>{
+    const el = document.getElementById('auth-result');
+    if (d.ok) { el.innerHTML = '<div class="alert alert-success">' + d.message + '</div>'; loadConfig(); }
+    else { el.innerHTML = '<div class="alert alert-danger">' + d.message + '</div>'; }
+    setTimeout(()=> el.innerHTML = '', 4000);
+  });
+}
+
+function generatePassword() {
+  if (!confirm('将随机生成一个16位强密码并启用密码保护，是否继续？')) return;
+  fetch('/api/auth/password', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({action: 'generate'})
+  }).then(r=>r.json()).then(d=>{
+    const el = document.getElementById('auth-result');
+    if (d.ok) {
+      el.innerHTML = '<div class="alert alert-success">密码已生成并保存！<br><strong>新密码: ' + escHtml(d.password) + '</strong><br><span style="font-size:12px;color:var(--text2)">请立即复制保存，关闭后无法再次查看！</span></div>';
+      loadConfig();
+    } else {
+      el.innerHTML = '<div class="alert alert-danger">' + d.message + '</div>';
+    }
+  });
+}
+
+function clearPassword() {
+  if (!confirm('确定要关闭密码保护吗？')) return;
+  fetch('/api/auth/password', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({action: 'clear'})
+  }).then(r=>r.json()).then(d=>{
+    const el = document.getElementById('auth-result');
+    if (d.ok) { el.innerHTML = '<div class="alert alert-success">' + d.message + '</div>'; loadConfig(); }
+    else { el.innerHTML = '<div class="alert alert-danger">' + d.message + '</div>'; }
+    setTimeout(()=> el.innerHTML = '', 4000);
+  });
+}
+
+document.getElementById('cfg-auth-enabled').addEventListener('change', function() {
+  document.getElementById('auth-actions').style.display = this.checked ? 'flex' : 'none';
+});
+
 // ── 配置 ──
 function loadConfig() {
   fetch('/api/config').then(r=>r.json()).then(d=>{
@@ -1984,6 +2177,11 @@ function loadConfig() {
     set('cfg-logging-level', lg.level);
     set('cfg-logging-file', lg.file);
     set('cfg-logging-console', lg.console);
+
+    const au = cfg.auth || {};
+    set('cfg-auth-enabled', au.enabled);
+    // 显示/隐藏密码操作按钮
+    document.getElementById('auth-actions').style.display = au.enabled ? 'flex' : 'none';
   });
 }
 
@@ -2044,6 +2242,9 @@ function saveConfig() {
       level: get('cfg-logging-level'),
       file: get('cfg-logging-file'),
       console: get('cfg-logging-console'),
+    },
+    auth: {
+      enabled: get('cfg-auth-enabled'),
     },
   };
 
@@ -2163,6 +2364,7 @@ function escHtml(str) {
 
 // ── 初始化 ──
 (function init() {
+  checkAuthGate();
   loadConfig();
   fetch('/api/bot/status').then(r=>r.json()).then(d => updateStats(d));
 })();
@@ -2192,6 +2394,12 @@ def main():
     cfg = load_config()
     cookie = cfg.get("bilibili", {}).get("cookie", "")
     api_key = cfg.get("deepseek", {}).get("api_key", "")
+    auth_enabled = cfg.get("auth", {}).get("enabled", False)
+
+    if auth_enabled:
+        print("🔒 登录密码保护已启用")
+    else:
+        print("⚠️  未启用登录密码保护，建议在配置 > 安全中设置密码")
 
     if cookie and api_key:
         print("检测到有效配置，自动启动机器人...")

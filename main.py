@@ -2393,6 +2393,7 @@ def main():
     host = "0.0.0.0"
     port = 5000
     url = f"http://{host}:{port}"
+    browser_url = f"http://localhost:{port}"
     print(f"""
 ╔══════════════════════════════════════════╗
 ║       B站评论自动回复机器人 Web UI        ║
@@ -2426,7 +2427,7 @@ def main():
 
     # 延迟打开浏览器（Docker 环境下不打开）
     if os.getenv('DOCKER_ENV') != 'true':
-        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+        threading.Timer(1.5, lambda: webbrowser.open(browser_url)).start()
     socketio.run(app, host=host, port=port, debug=False, use_reloader=False, log_output=False, allow_unsafe_werkzeug=True)
 
 

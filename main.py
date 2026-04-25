@@ -1106,11 +1106,22 @@ class BiliCommentBot:
             title = video.get("title", "")
             self.logger.info(f"处理视频: {title} ({bvid})")
             comments = self.get_video_comments(bvid)
+            
+            # 获取机器人自己的UID，用于过滤自己发的评论
+            my_uid = self.config["bilibili"].get("uid", "")
+            
             for idx, comment in enumerate(comments):
                 if processed_count >= max_process:
                     break
                 if comment.comment_id in self.processed_comments:
                     continue
+                
+                # 过滤自己发的评论（避免回复自己产生的评论，特别是楼中楼回复后产生的新评论）
+                if my_uid and comment.uid == my_uid:
+                    self.logger.debug(f"跳过自己的评论: {comment.comment_id}")
+                    self.processed_comments.add(comment.comment_id)
+                    continue
+                
                 self.logger.info(f"处理评论: [{comment.user}] {comment.content[:40]}... (深度: {comment.depth})")
                 
                 # 构建上下文：对于子评论，包含父评论信息
@@ -1152,6 +1163,9 @@ class BiliCommentBot:
                             self.logger.info(f"楼中楼回复成功: {comment.comment_id}")
                             # 标记当前评论为已处理
                             self.processed_comments.add(comment.comment_id)
+                            # 楼中楼回复也需要保存历史记录，否则程序重启后会重复回复
+                            self.save_history(comment, reply)
+                            continue  # 楼中楼回复成功，跳过后续处理
                         else:
                             continue  # 回复失败，跳过后续操作
                     else:

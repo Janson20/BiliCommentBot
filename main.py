@@ -1144,10 +1144,11 @@ class BiliCommentBot:
                             self.logger.error(f"楼中楼回复失败：根评论ID为空 (comment_id={comment.comment_id})")
                             continue
                             
-                        self.logger.info(f"楼中楼回复: 根评论={comment.root_id}, 父评论={comment.parent_id}")
+                        self.logger.info(f"楼中楼回复: 根评论={comment.root_id}, 当前评论={comment.comment_id}")
+                        # 注意：不传递parent_id，让reply_comment默认使用comment_id作为parent
+                        # 这样B站API才能正确在子评论下回复，而不是在父评论下回复
                         if self.reply_comment(bvid, comment.comment_id, reply, 
-                                            root_id=comment.root_id, 
-                                            parent_id=comment.comment_id):
+                                            root_id=comment.root_id):
                             self.logger.info(f"楼中楼回复成功: {comment.comment_id}")
                             # 标记当前评论为已处理
                             self.processed_comments.add(comment.comment_id)

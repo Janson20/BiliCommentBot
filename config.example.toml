@@ -77,6 +77,10 @@ only_bvid = ""
 like_user_video_enabled = false
 # 是否仅点赞关注了你的用户的视频（需要配置 uid）
 like_user_video_only_followers = false
+# 是否启用链式回复（楼中楼）
+chained_reply_enabled = true
+# 最大回复深度（层数），设置楼中楼回复的最大嵌套层数
+max_reply_depth = 3
 
 # 日志配置
 [logging]

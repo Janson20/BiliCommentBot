@@ -86,6 +86,8 @@ DEFAULT_CONFIG = {
         "only_bvid": "",
         "like_user_video_enabled": False,
         "like_user_video_only_followers": False,
+        "chained_reply_enabled": True,
+        "max_reply_depth": 3,
     },
     "logging": {
         "level": "INFO",
@@ -317,6 +319,14 @@ class Comment:
     uid: str
     time: int
     replied: bool = False
+    parent_id: Optional[str] = None  # 父评论ID，主评论为None
+    root_id: Optional[str] = None     # 根评论ID，用于楼中楼回复
+    depth: int = 0                    # 嵌套深度，主评论为0，子评论为1，以此类推
+    children: List['Comment'] = None  # 子评论列表
+
+    def __post_init__(self):
+        if self.children is None:
+            self.children = []
 
 
 # ─────────────────────────────────────────────
@@ -709,10 +719,16 @@ class BiliCommentBot:
         aid = self.bvid_to_aid(bvid)
         if not aid:
             return []
+        
+        # 检查是否启用链式回复
+        chained_reply_enabled = self.config["reply"].get("chained_reply_enabled", True)
+        max_reply_depth = self.config["reply"].get("max_reply_depth", 3)
+        
         all_comments = []
         pn = 1
         max_pn = self.config["bilibili"].get("max_comment_pages", 10)
         page_size = 20
+        
         while pn <= max_pn:
             params = {"type": 1, "oid": aid, "pn": pn, "ps": page_size, "sort": 2}
             try:
@@ -725,14 +741,35 @@ class BiliCommentBot:
                     replies = data.get("data", {}).get("replies", [])
                     if not replies:
                         break
+                    
                     for r in replies:
-                        all_comments.append(Comment(
+                        # 添加主评论
+                        main_comment = Comment(
                             comment_id=str(r["rpid"]),
                             content=r["content"]["message"],
                             user=r["member"]["uname"],
                             uid=str(r["member"]["mid"]),
                             time=r["ctime"],
-                        ))
+                            depth=0
+                        )
+                        all_comments.append(main_comment)
+                        
+                        # 如果启用链式回复，获取子评论（楼中楼）
+                        if chained_reply_enabled:
+                            self.logger.debug(f"检查评论 {main_comment.comment_id} 的子评论...")
+                            child_replies = self.get_comment_replies(
+                                bvid, 
+                                main_comment.comment_id, 
+                                max_depth=max_reply_depth - 1  # 减去主评论这一层
+                            )
+                            
+                            if child_replies:
+                                self.logger.info(f"评论 {main_comment.comment_id} 有 {len(child_replies)} 条子评论")
+                                # 将子评论也添加到列表中
+                                all_comments.extend(child_replies)
+                                # 同时保存到主评论的children字段，用于构建评论树
+                                main_comment.children = child_replies
+                    
                     if len(replies) < page_size:
                         break
                     pn += 1
@@ -745,7 +782,92 @@ class BiliCommentBot:
             except Exception as e:
                 self.logger.error(f"获取评论异常: {e}")
                 break
+        
+        if chained_reply_enabled:
+            main_count = sum(1 for c in all_comments if c.depth == 0)
+            child_count = len(all_comments) - main_count
+            self.logger.info(f"共获取 {main_count} 条主评论和 {child_count} 条子评论")
+        
         return all_comments
+
+    def get_comment_replies(self, bvid: str, root_comment_id: str, max_depth: int = 2, current_depth: int = 1) -> List[Comment]:
+        """
+        获取指定评论的子评论（楼中楼）
+        
+        Args:
+            bvid: 视频BVID
+            root_comment_id: 根评论ID
+            max_depth: 最大递归深度
+            current_depth: 当前深度
+            
+        Returns:
+            子评论列表
+        """
+        if current_depth > max_depth:
+            return []
+        
+        url = "https://api.bilibili.com/x/v2/reply/reply"
+        aid = self.bvid_to_aid(bvid)
+        if not aid:
+            return []
+        
+        all_replies = []
+        pn = 1
+        page_size = 10  # 子评论每页数量
+        
+        while True:
+            params = {"type": 1, "oid": aid, "root": root_comment_id, "pn": pn, "ps": page_size}
+            try:
+                response = self.make_request_with_retry("GET", url, params=params)
+                if not response:
+                    break
+                
+                rt = self.decompress_response(response)
+                data = json.loads(rt)
+                
+                if data.get("code") != 0:
+                    break
+                
+                replies_data = data.get("data", {}).get("replies", [])
+                if not replies_data:
+                    break
+                
+                for r in replies_data:
+                    child_comment = Comment(
+                        comment_id=str(r["rpid"]),
+                        content=r["content"]["message"],
+                        user=r["member"]["uname"],
+                        uid=str(r["member"]["mid"]),
+                        time=r["ctime"],
+                        parent_id=root_comment_id,
+                        root_id=root_comment_id,
+                        depth=current_depth
+                    )
+                    
+                    # 递归获取子评论的子评论
+                    if current_depth < max_depth:
+                        grandchildren = self.get_comment_replies(
+                            bvid, 
+                            child_comment.comment_id, 
+                            max_depth, 
+                            current_depth + 1
+                        )
+                        child_comment.children = grandchildren
+                    
+                    all_replies.append(child_comment)
+                
+                # 检查是否还有更多页
+                page_info = data.get("data", {}).get("page", {})
+                if page_info.get("count", 0) <= pn * page_size:
+                    break
+                
+                pn += 1
+                
+            except Exception as e:
+                self.logger.error(f"获取子评论异常: {e}")
+                break
+        
+        return all_replies
 
     def generate_reply(self, comment: str, context: List[Comment] = None, video_title: str = None, video_desc: str = None) -> Optional[str]:
         api_config = self.config["deepseek"]
@@ -886,7 +1008,17 @@ class BiliCommentBot:
             self.logger.error(f"检查粉丝关系异常: {e}", exc_info=True)
             return False
 
-    def reply_comment(self, bvid: str, comment_id: str, content: str) -> bool:
+    def reply_comment(self, bvid: str, comment_id: str, content: str, root_id: str = None, parent_id: str = None) -> bool:
+        """
+        回复评论（支持楼中楼）
+        
+        Args:
+            bvid: 视频BVID
+            comment_id: 要回复的评论ID
+            content: 回复内容
+            root_id: 根评论ID（用于楼中楼回复，为None时表示回复主评论）
+            parent_id: 父评论ID（用于楼中楼回复，为None时表示回复主评论）
+        """
         if self.cookie_manager:
             self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
         if not self.csrf_token:
@@ -897,17 +1029,29 @@ class BiliCommentBot:
             if not is_valid:
                 self.logger.error(f"Cookie无效: {result.get('message')}")
                 return False
+        
         url = "https://api.bilibili.com/x/v2/reply/add"
         aid = self.bvid_to_aid(bvid)
         prefix = self.config["reply"].get("prefix", "")
-        data = {"type": 1, "oid": aid, "root": comment_id, "parent": comment_id, "message": f"{prefix}{content}", "csrf": self.csrf_token}
+        
+        # 对于楼中楼回复，需要正确设置 root 和 parent
+        # root: 根评论ID（如果是回复主评论，则等于comment_id）
+        # parent: 父评论ID（如果是回复主评论，则等于comment_id；如果是回复子评论，则是子评论ID）
+        root = root_id if root_id else comment_id
+        parent = parent_id if parent_id else comment_id
+        
+        data = {"type": 1, "oid": aid, "root": root, "parent": parent, "message": f"{prefix}{content}", "csrf": self.csrf_token}
+        
+        reply_type = "楼中楼回复" if root_id else "主评论回复"
+        self.logger.debug(f"{reply_type}: bvid={bvid}, root={root}, parent={parent}, comment_id={comment_id}")
+        
         try:
             response = self.make_request_with_retry("POST", url, data=data)
             if not response:
                 return False
             result = json.loads(self.decompress_response(response))
             if result.get("code") == 0:
-                self.logger.info(f"回复成功: {comment_id}")
+                self.logger.info(f"回复成功: {comment_id} (类型: {reply_type})")
                 return True
             self.logger.error(f"回复失败: {result.get('message')}")
             return False
@@ -967,15 +1111,52 @@ class BiliCommentBot:
                     break
                 if comment.comment_id in self.processed_comments:
                     continue
-                self.logger.info(f"处理评论: [{comment.user}] {comment.content[:40]}...")
+                self.logger.info(f"处理评论: [{comment.user}] {comment.content[:40]}... (深度: {comment.depth})")
+                
+                # 构建上下文：对于子评论，包含父评论信息
                 context = []
+                if comment.depth > 0 and comment.parent_id:
+                    # 楼中楼回复，查找父评论作为上下文
+                    parent_comment = next((c for c in comments if c.comment_id == comment.parent_id), None)
+                    if parent_comment:
+                        context.append(parent_comment)
+                        self.logger.debug(f"添加父评论到上下文: [{parent_comment.user}] {parent_comment.content[:30]}...")
+                
+                # 添加前面的评论作为上下文
                 if context_count > 0 and idx > 0:
-                    context = comments[max(0, idx - context_count):idx]
+                    # 获取前面的评论，但排除已经作为上下文的父评论
+                    start_idx = max(0, idx - context_count)
+                    for i in range(start_idx, idx):
+                        if comments[i].comment_id != comment.parent_id:
+                            context.append(comments[i])
+                
                 reply = self.generate_reply(comment.content, context, title, video.get("desc", ""))
                 if reply:
                     if self.config["reply"].get("like_enabled", False):
                         self.like_comment(bvid, comment.comment_id)
-                    if self.reply_comment(bvid, comment.comment_id, reply):
+                    
+                    # 判断是否是子评论（楼中楼）
+                    is_child_comment = comment.depth > 0 and comment.root_id is not None
+                    
+                    if is_child_comment:
+                        # 楼中楼回复：使用正确的 root 和 parent 参数
+                        if not comment.root_id:
+                            self.logger.error(f"楼中楼回复失败：根评论ID为空 (comment_id={comment.comment_id})")
+                            continue
+                            
+                        self.logger.info(f"楼中楼回复: 根评论={comment.root_id}, 父评论={comment.parent_id}")
+                        if self.reply_comment(bvid, comment.comment_id, reply, 
+                                            root_id=comment.root_id, 
+                                            parent_id=comment.comment_id):
+                            self.logger.info(f"楼中楼回复成功: {comment.comment_id}")
+                            # 标记当前评论为已处理
+                            self.processed_comments.add(comment.comment_id)
+                        else:
+                            continue  # 回复失败，跳过后续操作
+                    else:
+                        # 主评论回复
+                        if not self.reply_comment(bvid, comment.comment_id, reply):
+                            continue  # 回复失败，跳过后续操作
                         self.processed_comments.add(comment.comment_id)
                         self.save_history(comment, reply)
                         processed_count += 1
@@ -1747,6 +1928,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             <div class="form-hint">生成回复时参考前 N 条评论作为上下文</div>
           </div>
           <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-reply-chained_reply_enabled" checked>
+              启用链式回复（楼中楼）
+            </label>
+            <div class="form-hint">启用后，机器人会监控并回复主评论下的子评论（楼中楼）</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">最大回复深度（层数）</label>
+            <input class="form-input" type="number" id="cfg-reply-max_reply_depth" value="3" min="1" max="10">
+            <div class="form-hint">设置楼中楼回复的最大嵌套层数（例如：3 表示最多回复到第 3 层评论）</div>
+          </div>
+          <div class="form-group">
             <label class="form-label">回复前缀（可留空）</label>
             <input class="form-input" id="cfg-reply-prefix" placeholder="">
           </div>
@@ -2173,6 +2366,8 @@ function loadConfig() {
     set('cfg-reply-max_process', r.max_process);
     set('cfg-reply-reply_delay', r.reply_delay);
     set('cfg-reply-context_comments_count', r.context_comments_count);
+    set('cfg-reply-chained_reply_enabled', r.chained_reply_enabled);
+    set('cfg-reply-max_reply_depth', r.max_reply_depth);
     set('cfg-reply-prefix', r.prefix);
     set('cfg-reply-only_bvid', r.only_bvid);
 
@@ -2236,6 +2431,8 @@ function saveConfig() {
       max_process: get('cfg-reply-max_process'),
       reply_delay: get('cfg-reply-reply_delay'),
       context_comments_count: get('cfg-reply-context_comments_count'),
+      chained_reply_enabled: get('cfg-reply-chained_reply_enabled'),
+      max_reply_depth: get('cfg-reply-max_reply_depth'),
       prefix: get('cfg-reply-prefix'),
       only_bvid: get('cfg-reply-only_bvid'),
     },

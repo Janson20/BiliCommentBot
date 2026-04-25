@@ -16,6 +16,7 @@
 - 🤖 自动监控 B 站视频的新增评论
 - 🎯 **仅回复指定视频**：支持配置只回复某个特定视频的评论
 - 🧠 使用 DeepSeek API 生成智能回复
+- 📝 **链式回复支持（楼中楼）**：监控并回复主评论下的子评论，实现多层对话互动
 - 👍 支持自动点赞评论（可选）
 - 🔥 **回复后点赞用户视频**：可自动点赞评论用户的最新视频
 - 👥 **仅给粉丝视频点赞**：支持只给关注了你的用户的视频点赞
@@ -250,6 +251,8 @@ docker run -d \
 | `only_bvid` | 仅回复指定视频的 BVID（留空则回复所有视频） | - |
 | `like_user_video_enabled` | 是否在回复后点赞评论用户的最新视频 | false |
 | `like_user_video_only_followers` | 是否仅点赞关注了你的用户的视频 | false |
+| `chained_reply_enabled` | 是否启用链式回复（楼中楼） | true |
+| `max_reply_depth` | 最大回复深度（层数），设置楼中楼回复的最大嵌套层数 | 3 |
 
 ### 请求频率控制
 
@@ -328,6 +331,8 @@ context_comments_count = 0
 only_bvid = ""  # 留空则回复所有视频，填写 BVID（如 BV1xx411c7mD）则仅回复该视频
 like_user_video_enabled = false  # 回复后自动点赞评论用户的最新视频
 like_user_video_only_followers = false  # 仅点赞关注了你的用户的视频（需要配置 uid）
+chained_reply_enabled = true  # 启用链式回复（楼中楼）
+max_reply_depth = 3  # 最大回复深度（层数）
 
 [rate_limit]
 min_request_interval = 2.0
@@ -397,6 +402,30 @@ console = true
 - 包含 cookie、refresh_token 和时间戳
 - 程序退出前自动保存
 - 启动时优先从文件加载
+
+### 链式回复支持（楼中楼）
+
+机器人支持监控并回复主评论下的子评论（即"楼中楼"），实现真正的多层对话互动：
+
+**功能特性**：
+- 自动获取主评论下的所有子评论
+- 支持配置最大回复深度（防止无限递归）
+- 回复子评论时，会自动将父评论作为上下文
+- 默认启用，可在配置中关闭
+
+**配置说明**：
+- `chained_reply_enabled`: 是否启用链式回复（默认 `true`）
+- `max_reply_depth`: 最大回复深度，例如设置为 `3` 表示最多回复到第 3 层评论（默认 `3`）
+
+**技术实现**：
+- 使用 B 站 API `https://api.bilibili.com/x/v2/reply/reply` 获取子评论
+- 递归获取子评论，支持配置最大深度
+- 回复时正确使用 `root` 和 `parent` 参数，确保回复显示在正确的位置
+
+**使用建议**：
+- 建议保持默认启用状态，以增强社区互动感
+- 如果视频评论量很大，可适当降低 `max_reply_depth` 以减少 API 请求
+- 配合 `only_new = true` 使用，避免重复回复
 
 ### 视频列表缓存
 

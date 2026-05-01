@@ -460,13 +460,12 @@ class BiliCommentBot:
             except Exception as e:
                 self.logger.error(f"处理评论异常: {e}", exc_info=True)
             socketio.emit("stats", self.get_stats())
-            interval = self.config["bilibili"].get("check_interval", 60)
+            interval = max(1, int(self.config["bilibili"].get("check_interval", 60)))
             self.logger.info(f"等待 {interval} 秒后进行下次检查")
-            # 分段sleep，方便快速响应停止
-            for _ in range(interval * 10):
+            for _ in range(interval):
                 if not self._running:
                     break
-                time.sleep(0.1)
+                time.sleep(1)
 
     def update_headers(self):
         self.session.headers.update({

@@ -831,17 +831,29 @@ class BiliCommentBot:
         except Exception as e:
             self.logger.error(f"保存部分视频缓存失败: {e}")
 
+    # ── B站 BVID ↔ AID 互转（本地算法，无需 API 调用）──
+    _BV_XOR = 23442827791579
+    _BV_MASK = 2251799813685247
+    _BV_BASE = 58
+    _BV_TABLE = "FcwAPNKTMug3GV5Lj7EJnHpWsx4tb8haYeviqBz6rkCy12mUSDQX9RdoZf"
+    _BV_REVERSE = {c: i for i, c in enumerate(_BV_TABLE)}
+
     def bvid_to_aid(self, bvid: str) -> str:
-        url = "https://api.bilibili.com/x/web-interface/view"
-        try:
-            response = self.make_request_with_retry("GET", url, params={"bvid": bvid})
-            if not response:
-                return ""
-            rt = self.decompress_response(response)
-            data = json.loads(rt)
-            if data.get("code") == 0:
-                return str(data.get("data", {}).get("aid", ""))
+        """本地算法 BVID → AID 转换，不发起 API 请求"""
+        if not bvid or not bvid.startswith("BV"):
             return ""
+        try:
+            bvid_arr = list(bvid[3:])
+            # swap(0, 6), swap(1, 4)
+            bvid_arr[0], bvid_arr[6] = bvid_arr[6], bvid_arr[0]
+            bvid_arr[1], bvid_arr[4] = bvid_arr[4], bvid_arr[1]
+            tmp = 0
+            for char in bvid_arr:
+                idx = self._BV_REVERSE.get(char)
+                if idx is None:
+                    return ""
+                tmp = tmp * self._BV_BASE + idx
+            return str((tmp & self._BV_MASK) ^ self._BV_XOR)
         except Exception:
             return ""
 
@@ -1097,22 +1109,20 @@ class BiliCommentBot:
             return None
 
     def like_video(self, bvid: str) -> bool:
-        """点赞视频"""
+        """点赞视频（使用 APP 端 API）"""
         self.logger.debug(f"开始点赞视频: {bvid}")
-        if self.cookie_manager:
-            self.csrf_token = self.cookie_manager._get_csrf_from_cookie()
-        if not self.csrf_token:
-            self.logger.error("点赞视频失败: 未找到 CSRF token")
-            return False
         aid = self.bvid_to_aid(bvid)
         if not aid:
             self.logger.error(f"点赞视频失败: 无法转换 BVID {bvid} 到 AID")
             return False
         self.logger.debug(f"视频 AID: {aid}")
-        url = "https://api.bilibili.com/x/web-interface/archive/like"
-        data = {"aid": aid, "like": 1, "csrf": self.csrf_token}
+        url = "https://app.bilibili.com/x/v2/view/like"
+        data = self._app_sign({"aid": aid, "like": "1"})
         try:
-            response = self.make_request_with_retry("POST", url, data=data)
+            response = self.make_request_with_retry(
+                "POST", url, data=data,
+                headers=self._make_app_headers(),
+            )
             if not response:
                 self.logger.warning(f"点赞视频失败: 请求无响应")
                 return False

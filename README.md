@@ -30,6 +30,18 @@
 - 📊 **详细的操作日志**：所有关键操作都有完整的日志记录
 - 🔒 **登录密码保护**：可设置访问密码，支持自定义或随机生成
 
+### API 版本
+
+为降低频率限制，以下接口已切换至 B 站 APP 端（模拟 BiliDroid 客户端）：
+
+| 功能 | 旧接口 (Web) | 新接口 (APP) |
+|------|-------------|-------------|
+| 视频列表 | `api.bilibili.com/x/space/arc/search` | `app.bilibili.com/x/v2/space/archive/cursor` |
+| 点赞视频 | `api.bilibili.com/x/web-interface/archive/like` | `app.bilibili.com/x/v2/view/like` |
+| BVID→AID | `/x/web-interface/view` (API) | 本地算法转换 (零网络开销) |
+
+APP 端接口需携带 appkey+sign 签名及 BiliDroid UA，程序已自动处理。
+
 ## 快速开始
 
 ### 方式一：本地运行
@@ -258,15 +270,16 @@ docker run -d \
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `min_request_interval` | 最小请求间隔（秒） | 2.0 |
+| `min_request_interval` | 最小请求间隔（秒） | 3.0 |
 | `max_retries` | 最大重试次数 | 3 |
 | `retry_delay` | 重试基础延迟（秒） | 5 |
 
 **智能频率控制机制**：
-- 动态调整请求间隔：根据连续失败次数自动增加间隔
-- 智能退避算法：遇到 429 状态码时解析 Retry-After 头部
-- 随机抖动：添加随机延迟避免同步重试
-- 请求头随机化：模拟真实用户行为
+- 指数退避：根据连续失败次数按 2^n 倍增长请求间隔，最大可达基础间隔的 10 倍
+- 频率限制检测：同时检测 HTTP 429 和 B 站 JSON 响应体中的频率限制错误码（-509/-412/-799 等）
+- 随机抖动：添加随机延迟避免多客户端同步重试
+- 请求头随机化：模拟真实用户行为，轮流使用多种 User-Agent
+- 视频列表 API 已切换至 B 站 APP 端接口，大幅降低频率限制触发概率
 
 ### 缓存配置
 
@@ -335,7 +348,7 @@ chained_reply_enabled = true  # 启用链式回复（楼中楼）
 max_reply_depth = 3  # 最大回复深度（层数）
 
 [rate_limit]
-min_request_interval = 2.0
+min_request_interval = 3.0
 max_retries = 3
 retry_delay = 5
 
@@ -478,9 +491,9 @@ console = true
 
 ### API 请求错误
 
-**错误提示：请求过于频繁 (429)**
-- 原因：请求频率超过 B 站限制
-- 解决：增大 `min_request_interval` 和 `reply_delay` 值
+**错误提示：请求过于频繁 (-509/-412/-799 或 HTTP 429)**
+- 原因：请求频率超过 B 站限制；视频列表接口为 APP 端 API，对频率限制已较宽松
+- 解决：增大 `min_request_interval` 值（建议 ≥ 5s），减少 `max_video_pages`，或利用视频缓存减少请求
 
 **错误提示：JSON 解析失败**
 - 原因：B 站 API 返回格式变更或响应被压缩
@@ -520,6 +533,13 @@ console = true
 - **后端**：Flask + Flask-SocketIO，提供 RESTful API 和 WebSocket 实时通信
 - **前端**：纯 HTML/CSS/JS，内嵌在 Python 字符串中
 - **机器人核心**：后台线程运行，响应停止信号
+
+### API 技术细节
+
+- **视频列表**：使用 B 站 APP 端 API (`app.bilibili.com`)，携带 appkey+sign 签名和 BiliDroid UA 模拟 Android 客户端
+- **BVID↔AID 互转**：纯本地数学算法（异或+查表），无需 API 请求，零网络开销
+- **评论/回复**：使用 B 站 Web 端 API (`api.bilibili.com`)，基于 Cookie 认证
+- **频率控制**：指数退避 + B站错误码检测（-509/-412/-799/10403）+ 部分结果缓存
 
 ### 主要模块
 

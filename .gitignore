@@ -30,3 +30,4 @@ video_cache.json
 # 其他
 .workbuddy/
 prompt.txt
+tmp/

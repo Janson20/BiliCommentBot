@@ -55,7 +55,7 @@ DEFAULT_CONFIG = {
         "max_video_pages": 10,
     },
     "rate_limit": {
-        "min_request_interval": 2.0,
+        "min_request_interval": 3.0,
         "max_retries": 3,
         "retry_delay": 5,
     },
@@ -476,6 +476,56 @@ class BiliCommentBot:
             "Connection": "keep-alive",
         })
 
+    # APP 端参数常量（模拟 Android HD 客户端）
+    _APP_COMMON_PARAMS = {
+        "build": "2001100",
+        "version": "2.0.1",
+        "mobi_app": "android_hd",
+        "platform": "android",
+        "channel": "master",
+        "c_locale": "zh_CN",
+        "s_locale": "zh_CN",
+        "statistics": '{"appId":5,"platform":3,"version":"2.0.1","abtest":""}',
+        "qn": "80",
+    }
+
+    _APP_USER_AGENTS = [
+        "Mozilla/5.0 BiliDroid/8.43.0 (bbcallen@gmail.com) os/android model/android mobi_app/android build/8430300 channel/master innerVer/8430300 osVer/15 network/2",
+        "Mozilla/5.0 BiliDroid/8.42.0 (bbcallen@gmail.com) os/android model/android mobi_app/android build/8420300 channel/master innerVer/8420300 osVer/14 network/2",
+        "Mozilla/5.0 BiliDroid/8.43.0 (bbcallen@gmail.com) os/android model/android_hd mobi_app/android_hd build/2001100 channel/master innerVer/2001100 osVer/15 network/2",
+    ]
+
+    _APP_BASE_HEADERS = {
+        "env": "prod",
+        "app-key": "android64",
+        "x-bili-aurora-zone": "sh001",
+        "bili-http-engine": "cronet",
+        "Accept": "application/json",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+
+    def _make_app_headers(self) -> dict:
+        """构造 APP 客户端请求头（每次调用随机 UA，避免指纹固定）"""
+        headers = dict(self._APP_BASE_HEADERS)
+        headers["User-Agent"] = random.choice(self._APP_USER_AGENTS)
+        return headers
+
+    def _app_sign(self, params: dict) -> dict:
+        """对 APP API 请求参数签名（模拟 BiliDroid 客户端的 appkey+sign 算法）"""
+        # 使用 copy 避免修改原 params
+        signed = dict(params)
+        signed["appkey"] = "dfca71928277209b"
+        signed["ts"] = str(int(time.time()))
+        # 按 key 字母序排序，URL 编码每个 key=value，拼接后追加 appsec 再求 MD5
+        sorted_keys = sorted(signed.keys())
+        raw = "&".join(
+            f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(str(signed[k]), safe='')}"
+            for k in sorted_keys
+        )
+        appsec = "b5475a8825547a4fc26c7d518eaaa02e"
+        signed["sign"] = hashlib.md5((raw + appsec).encode()).hexdigest()
+        return signed
+
     def get_cache_key(self, url: str, params: dict = None) -> str:
         cache_data = f"{url}_{str(sorted(params.items()) if params else '')}"
         return hashlib.md5(cache_data.encode()).hexdigest()
@@ -491,15 +541,42 @@ class BiliCommentBot:
     def set_cache(self, key: str, data: dict):
         self.cache[key] = (data, time.time())
 
+    # B站频率限制相关错误码（HTTP 200 但在响应体中返回频率限制）
+    BILI_RATE_LIMIT_CODES = frozenset({-509, -412, -799, 412, 509, 799, 10403})
+
+    def _is_bili_rate_limited(self, response) -> bool:
+        """检测 B站 API 响应体中的频率限制错误码"""
+        if response.status_code == 429:
+            return True
+        try:
+            # 仅对 application/json 响应检查，避免误解析 HTML 页面
+            ct = response.headers.get("Content-Type", "")
+            if "json" not in ct:
+                return False
+            data = response.json()
+            code = data.get("code", 0)
+            if code in self.BILI_RATE_LIMIT_CODES:
+                return True
+            msg = data.get("message", "")
+            if isinstance(msg, str) and ("过于频繁" in msg or "请求过于频繁" in msg or "访问被拒绝" in msg):
+                return True
+        except Exception:
+            pass
+        return False
+
     def rate_limit_request(self):
         current_time = time.time()
         elapsed = current_time - self.last_request_time
         if self.consecutive_failures > 0:
-            self.adaptive_interval = min(self.min_request_interval * (1 + self.consecutive_failures * 0.5), self.min_request_interval * 5)
+            # 指数退避: base * 2^failures，上限 base * 10
+            self.adaptive_interval = min(
+                self.min_request_interval * (2 ** self.consecutive_failures),
+                self.min_request_interval * 10
+            )
         else:
             self.adaptive_interval = self.min_request_interval
         if elapsed < self.adaptive_interval:
-            sleep_time = self.adaptive_interval - elapsed + random.uniform(0, 0.5)
+            sleep_time = self.adaptive_interval - elapsed + random.uniform(0, 1.0)
             time.sleep(sleep_time)
         self.last_request_time = time.time()
         self.update_headers()
@@ -523,11 +600,22 @@ class BiliCommentBot:
             try:
                 self.rate_limit_request()
                 response = self.session.request(method, url, timeout=15, **kwargs)
-                if response.status_code == 429:
+                # 检测 B站 API 响应体中的频率限制错误码（如 -509 "请求过于频繁"）
+                if self._is_bili_rate_limited(response):
                     self.consecutive_failures += 1
                     if attempt < self.max_retries - 1:
-                        wait = int(response.headers.get("Retry-After", self.retry_delay * (2 ** attempt))) + random.uniform(0, 3)
-                        self.logger.warning(f"请求频繁，等待 {wait:.1f}s 后重试")
+                        retry_after = response.headers.get("Retry-After", "")
+                        if retry_after.isdigit():
+                            wait = int(retry_after)
+                        else:
+                            # B站频率限制时退避更久：基数比普通 429 更大
+                            wait = max(self.retry_delay * (2 ** attempt), self.min_request_interval * (2 + attempt))
+                        wait += random.uniform(0, 2)
+                        self.logger.warning(
+                            f"请求频率限制 [{url}], 等待 {wait:.1f}s 后重试 "
+                            f"(attempt {attempt + 1}/{self.max_retries}, "
+                            f"failures: {self.consecutive_failures})"
+                        )
                         time.sleep(wait)
                         continue
                 elif response.status_code >= 500:
@@ -653,6 +741,7 @@ class BiliCommentBot:
             self.logger.error(f"保存视频缓存失败: {e}")
 
     def get_video_list(self) -> List[dict]:
+        """获取视频列表（使用 APP 端 API，频率限制比 Web 端宽松很多）"""
         uid = self.config["bilibili"].get("uid")
         if not uid:
             self.logger.error("未配置uid")
@@ -661,15 +750,24 @@ class BiliCommentBot:
         if self.cached_videos and (current_time - self.last_video_fetch_time) < self.video_cache_expire_time:
             self.logger.info(f"使用视频缓存，共{len(self.cached_videos)}个")
             return self.cached_videos
-        self.logger.info("重新获取视频列表...")
+        self.logger.info("重新获取视频列表（APP API）...")
         max_pn = self.config["bilibili"].get("max_video_pages", 5)
         all_videos = []
         pn = 1
-        url = "https://api.bilibili.com/x/space/arc/search"
+        url = "https://app.bilibili.com/x/v2/space/archive/cursor"
+        # APP API 页间延迟无需太长，3~5s 即可
+        inter_page_delay_base = max(self.min_request_interval * 1.2, 3.0)
         while pn <= max_pn:
-            params = {"mid": uid, "ps": 20, "pn": pn, "order": "pubdate"}
+            params = self._app_sign({"vmid": uid, "ps": 20, "pn": pn, "order": "pubdate", "sort": "desc", **self._APP_COMMON_PARAMS})
             try:
-                response = self.make_request_with_retry("GET", url, params=params, use_cache=False)
+                if pn > 1:
+                    extra_delay = inter_page_delay_base + random.uniform(0, 1.5)
+                    self.logger.debug(f"视频列表页间延迟 {extra_delay:.1f}s（第{pn}页）")
+                    time.sleep(extra_delay)
+                response = self.make_request_with_retry(
+                    "GET", url, params=params, use_cache=False,
+                    headers=self._make_app_headers(),
+                )
                 if not response:
                     break
                 rt = self.decompress_response(response)
@@ -677,16 +775,35 @@ class BiliCommentBot:
                     break
                 data = json.loads(rt)
                 if data.get("code") == 0:
-                    page_videos = data.get("data", {}).get("list", {}).get("vlist", [])
-                    if not page_videos:
+                    items = data.get("data", {}).get("item", [])
+                    if not items:
                         break
-                    all_videos.extend(page_videos)
-                    self.logger.info(f"第{pn}页获取到{len(page_videos)}个视频，累计{len(all_videos)}个")
-                    if len(page_videos) < 20:
+                    for item in items:
+                        all_videos.append({
+                            "bvid": item.get("bvid", ""),
+                            "title": item.get("title", ""),
+                            "desc": item.get("description", "") or "",
+                            "play": item.get("play", 0),
+                            "comment": item.get("comment", 0),
+                        })
+                    self.logger.info(f"第{pn}页获取到{len(items)}个视频，累计{len(all_videos)}个")
+                    has_next = data.get("data", {}).get("has_next", True)
+                    if not has_next or len(items) < 20:
                         break
                     pn += 1
                 else:
-                    self.logger.error(f"获取视频列表失败: {data.get('message')}")
+                    error_code = data.get("code", 0)
+                    error_msg = data.get("message", "")
+                    self.logger.error(f"获取视频列表第{pn}页失败: code={error_code} msg={error_msg}")
+                    if error_code in self.BILI_RATE_LIMIT_CODES or "过于频繁" in str(error_msg):
+                        if all_videos:
+                            self.logger.warning(
+                                f"视频列表获取被频率限制，保留已取得的 {len(all_videos)} 个视频"
+                            )
+                            self._partial_save_video_cache(all_videos, current_time)
+                        else:
+                            self.logger.warning("视频列表被频率限制且无已获取数据，将使用过期缓存")
+                        break
                     break
             except Exception as e:
                 self.logger.error(f"获取视频列表异常: {e}")
@@ -697,7 +814,22 @@ class BiliCommentBot:
             self.save_video_cache(all_videos)
             socketio.emit("video_list", {"count": len(all_videos), "videos": all_videos[:20]})
             return all_videos
+        if self.cached_videos:
+            cache_age_h = (current_time - self.last_video_fetch_time) / 3600
+            self.logger.warning(
+                f"获取视频列表失败，回退到过期缓存（{cache_age_h:.1f}小时前，{len(self.cached_videos)}个视频）"
+            )
         return self.cached_videos
+
+    def _partial_save_video_cache(self, videos: List[dict], fetch_time: float):
+        """保存部分获取的视频缓存（被频率限制时仍保留已有数据）"""
+        try:
+            self.cached_videos = videos
+            self.last_video_fetch_time = fetch_time
+            self.save_video_cache(videos)
+            socketio.emit("video_list", {"count": len(videos), "videos": videos[:20]})
+        except Exception as e:
+            self.logger.error(f"保存部分视频缓存失败: {e}")
 
     def bvid_to_aid(self, bvid: str) -> str:
         url = "https://api.bilibili.com/x/web-interface/view"
@@ -922,27 +1054,43 @@ class BiliCommentBot:
             return False
 
     def get_user_latest_video(self, uid: str) -> Optional[dict]:
-        """获取用户的最新视频"""
+        """获取用户的最新视频（使用 APP 端 API）"""
         self.logger.debug(f"开始获取用户 {uid} 的最新视频...")
-        url = "https://api.bilibili.com/x/space/arc/search"
-        params = {"mid": uid, "ps": 1, "pn": 1, "order": "pubdate"}
+        url = "https://app.bilibili.com/x/v2/space/archive/cursor"
+        params = self._app_sign({"vmid": uid, "ps": 1, "pn": 1, "order": "pubdate", "sort": "desc", **self._APP_COMMON_PARAMS})
         try:
-            response = self.make_request_with_retry("GET", url, params=params, use_cache=False)
+            response = self.make_request_with_retry(
+                "GET", url, params=params, use_cache=False,
+                headers=self._make_app_headers(),
+            )
             if not response:
-                self.logger.warning(f"获取用户 {uid} 视频列表失败：请求无响应")
+                self.logger.warning(f"获取用户 {uid} 视频列表失败：请求无响应（可能被频率限制）")
                 return None
             rt = self.decompress_response(response)
             data = json.loads(rt)
             if data.get("code") == 0:
-                videos = data.get("data", {}).get("list", {}).get("vlist", [])
-                if videos:
-                    video = videos[0]
-                    self.logger.debug(f"成功获取用户 {uid} 的最新视频: {video.get('title', 'N/A')} ({video.get('bvid', 'N/A')})")
-                    return video
+                items = data.get("data", {}).get("item", [])
+                if items:
+                    video = items[0]
+                    result = {
+                        "bvid": video.get("bvid", ""),
+                        "title": video.get("title", ""),
+                        "play": video.get("play", 0),
+                        "comment": video.get("comment", 0),
+                    }
+                    self.logger.debug(
+                        f"成功获取用户 {uid} 的最新视频: {result.get('title', 'N/A')} ({result.get('bvid', 'N/A')})"
+                    )
+                    return result
                 else:
                     self.logger.warning(f"用户 {uid} 没有视频")
             else:
-                self.logger.warning(f"获取用户 {uid} 视频列表失败: {data.get('message', '未知错误')}")
+                error_code = data.get("code", 0)
+                error_msg = data.get("message", "")
+                if error_code in self.BILI_RATE_LIMIT_CODES or "过于频繁" in str(error_msg):
+                    self.logger.warning(f"获取用户 {uid} 视频列表被频率限制: code={error_code} msg={error_msg}")
+                else:
+                    self.logger.warning(f"获取用户 {uid} 视频列表失败: code={error_code} msg={error_msg}")
             return None
         except Exception as e:
             self.logger.error(f"获取用户 {uid} 最新视频异常: {e}", exc_info=True)
@@ -1971,7 +2119,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <div class="form-row-3">
             <div class="form-group">
               <label class="form-label">最小请求间隔（秒）</label>
-              <input class="form-input" type="number" step="0.5" id="cfg-rate_limit-min_request_interval" value="2">
+              <input class="form-input" type="number" step="0.5" id="cfg-rate_limit-min_request_interval" value="3">
             </div>
             <div class="form-group">
               <label class="form-label">最大重试次数</label>

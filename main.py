@@ -868,6 +868,7 @@ class BiliCommentBot:
         max_reply_depth = self.config["reply"].get("max_reply_depth", 3)
         
         all_comments = []
+        seen_ids = set()  # 去重：防止同一条评论被多次加入列表
         pn = 1
         max_pn = self.config["bilibili"].get("max_comment_pages", 10)
         page_size = 20
@@ -886,9 +887,14 @@ class BiliCommentBot:
                         break
                     
                     for r in replies:
+                        cid = str(r["rpid"])
+                        if cid in seen_ids:
+                            continue
+                        seen_ids.add(cid)
+                        
                         # 添加主评论
                         main_comment = Comment(
-                            comment_id=str(r["rpid"]),
+                            comment_id=cid,
                             content=r["content"]["message"],
                             user=r["member"]["uname"],
                             uid=str(r["member"]["mid"]),
@@ -907,11 +913,15 @@ class BiliCommentBot:
                             )
                             
                             if child_replies:
-                                self.logger.info(f"评论 {main_comment.comment_id} 有 {len(child_replies)} 条子评论")
-                                # 将子评论也添加到列表中
-                                all_comments.extend(child_replies)
+                                # 去重：过滤已存在的子评论
+                                filtered_children = [c for c in child_replies if c.comment_id not in seen_ids]
+                                for c in filtered_children:
+                                    seen_ids.add(c.comment_id)
+                                self.logger.info(f"评论 {main_comment.comment_id} 有 {len(child_replies)} 条子评论（去重后 {len(filtered_children)} 条）")
+                                # 将去重后的子评论添加到列表中
+                                all_comments.extend(filtered_children)
                                 # 同时保存到主评论的children字段，用于构建评论树
-                                main_comment.children = child_replies
+                                main_comment.children = filtered_children
                     
                     if len(replies) < page_size:
                         break
@@ -1273,10 +1283,12 @@ class BiliCommentBot:
                 if comment.comment_id in self.processed_comments:
                     continue
                 
+                # 立即标记为处理中，防止同一条评论在同一批次或并发场景下被重复处理
+                self.processed_comments.add(comment.comment_id)
+                
                 # 过滤自己发的评论（避免回复自己产生的评论，特别是楼中楼回复后产生的新评论）
                 if my_uid and comment.uid == my_uid:
                     self.logger.debug(f"跳过自己的评论: {comment.comment_id}")
-                    self.processed_comments.add(comment.comment_id)
                     continue
                 
                 self.logger.info(f"处理评论: [{comment.user}] {comment.content[:40]}... (深度: {comment.depth})")

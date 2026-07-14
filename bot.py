@@ -313,6 +313,11 @@ class BiliCommentBot:
         self.auto_refresh_cookie = self.config["bilibili"].get("auto_refresh_cookie", True)
         self._init_cookie()
 
+        # 历史记录缓冲（必须在 load_history 之前初始化）
+        self._history_buffer: List[dict] = []
+        self._history_dirty = False
+        self._history_flush_interval = 10  # 每 10 条 flush 一次
+
         # 历史 & 缓存
         self.processed_comments: set = set()
         self.load_history()
@@ -343,11 +348,6 @@ class BiliCommentBot:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-
-        # 历史记录缓冲（每 N 条写一次磁盘）
-        self._history_buffer: List[dict] = []
-        self._history_dirty = False
-        self._history_flush_interval = 10  # 每 10 条 flush 一次
 
         # 统计
         self.stats = {"total_replied": 0, "start_time": None, "last_check": None}

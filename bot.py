@@ -734,12 +734,13 @@ class BiliCommentBot:
                     if not items:
                         break
                     for item in items:
+                        stat = item.get("stat") or {}
                         all_videos.append({
                             "bvid": item.get("bvid", ""),
                             "title": item.get("title", ""),
-                            "desc": item.get("description", "") or "",
-                            "play": item.get("play", 0),
-                            "comment": item.get("comment", 0),
+                            "desc": item.get("description") or item.get("title", ""),
+                            "play": item.get("play") or stat.get("view", 0),
+                            "comment": item.get("comment") or stat.get("reply", 0),
                         })
                     self.logger.info(f"第{pn}页获取到{len(items)}个视频，累计{len(all_videos)}个")
                     has_next = data.get("data", {}).get("has_next", True)

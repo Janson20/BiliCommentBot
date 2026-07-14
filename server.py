@@ -4,7 +4,6 @@
 B站评论自动回复机器人 — Web 服务入口
 """
 import os
-import sys
 import time
 import json
 import logging
@@ -157,8 +156,16 @@ def get_bot() -> BiliCommentBot:
     if _bot is None:
         cfg = load_config()
         _bot_logger = _setup_logger(cfg)
-        _bot = BiliCommentBot(cfg, _bot_logger, socketio=socketio)
+        _bot = BiliCommentBot(cfg, _bot_logger, socketio=socketio,
+                              on_config_changed=lambda rt: _save_refresh_token(rt))
     return _bot
+
+
+def _save_refresh_token(new_token: str):
+    """持久化 refresh_token 到配置文件"""
+    cfg = load_config()
+    cfg.setdefault("bilibili", {})["refresh_token"] = new_token
+    save_config(cfg)
 
 
 # ─────────────────────────────────────────────

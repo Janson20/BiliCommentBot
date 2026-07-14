@@ -299,10 +299,11 @@ class BiliCommentBot:
     _BV_BASE = 58
     _BV_TABLE = "FcwAPNKTMug3GV5Lj7EJnHpWsx4tb8haYeviqBz6rkCy12mUSDQX9RdoZf"
 
-    def __init__(self, config: dict, logger: logging.Logger, socketio=None):
+    def __init__(self, config: dict, logger: logging.Logger, socketio=None, on_config_changed=None):
         self.config = config
         self.logger = logger
         self.socketio = socketio  # 可选，用于推送到前端
+        self.on_config_changed = on_config_changed  # 配置变更回调，用于持久化
 
         self.session = requests.Session()
         adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=Retry(total=0))
@@ -407,6 +408,9 @@ class BiliCommentBot:
         self.adaptive_interval = self.min_request_interval
         vc = config.get("video_cache", {})
         self.video_cache_expire_time = vc.get("expire_time", 43200)
+        # 刷新缓存设置（旧缓存最终会超时，但 expire_time 需立即生效）
+        self.cache_expire_time = config.get("cache", {}).get("expire_time", 300)
+        self.cache = {}  # 清空缓存让新配置立即生效
         # 重新初始化 Cookie
         self._init_cookie()
 
@@ -978,15 +982,30 @@ class BiliCommentBot:
             "temperature": api_config["temperature"],
         }
         try:
-            # 使用 bot 的 session（复用连接池和频率控制）
-            response = self.session.post(
-                f"{api_config['base_url']}/chat/completions",
-                headers=headers, json=data, timeout=30,
-            )
-            if response.status_code == 200:
-                return response.json()["choices"][0]["message"]["content"].strip()
-            self.logger.error(f"DeepSeek API失败: {response.status_code} {response.text[:200]}")
-            return None
+            # 使用 bot 的 session（复用连接池），失败时重试
+            max_attempts = max(1, self.config.get("rate_limit", {}).get("max_retries", 3))
+            for attempt in range(max_attempts):
+                try:
+                    response = self.session.post(
+                        f"{api_config['base_url']}/chat/completions",
+                        headers=headers, json=data, timeout=30,
+                    )
+                    if response.status_code == 200:
+                        return response.json()["choices"][0]["message"]["content"].strip()
+                    self.logger.error(f"DeepSeek API失败: {response.status_code} {response.text[:200]}")
+                    if attempt < max_attempts - 1:
+                        wait = self.retry_delay * (2 ** attempt) + random.uniform(0, 2)
+                        self.logger.warning(f"DeepSeek API重试 ({attempt+1}/{max_attempts}) 等待 {wait:.1f}s")
+                        time.sleep(wait)
+                        continue
+                    return None
+                except requests.exceptions.RequestException as e:
+                    self.logger.error(f"DeepSeek API请求异常: {e}")
+                    if attempt < max_attempts - 1:
+                        wait = self.retry_delay * (2 ** attempt) + random.uniform(0, 2)
+                        time.sleep(wait)
+                        continue
+                    return None
         except Exception as e:
             self.logger.error(f"DeepSeek API异常: {e}")
             return None
@@ -1027,11 +1046,12 @@ class BiliCommentBot:
                 items = data.get("data", {}).get("item", [])
                 if items:
                     video = items[0]
+                    stat = video.get("stat") or {}
                     result = {
                         "bvid": video.get("bvid", ""),
                         "title": video.get("title", ""),
-                        "play": video.get("play", 0),
-                        "comment": video.get("comment", 0),
+                        "play": video.get("play") or stat.get("view", 0),
+                        "comment": video.get("comment") or stat.get("reply", 0),
                     }
                     self.logger.debug(
                         f"成功获取用户 {uid} 的最新视频: {result.get('title', 'N/A')} ({result.get('bvid', 'N/A')})"
@@ -1151,7 +1171,8 @@ class BiliCommentBot:
             new_rt = result.get("new_refresh_token")
             if new_rt:
                 self.config["bilibili"]["refresh_token"] = new_rt
-                # 需要通知上层保存配置；通过返回值让 server 层处理
+                if self.on_config_changed:
+                    self.on_config_changed(new_rt)
         self.last_cookie_refresh_time = current_time
 
     # ── 主处理循环 ──
@@ -1255,31 +1276,27 @@ class BiliCommentBot:
                         self.logger.info(f"[点赞视频] 配置已启用，准备点赞用户 {comment.user} (UID: {comment.uid}) 的最新视频")
                         only_followers = self.config["reply"].get("like_user_video_only_followers", False)
 
+                        skip_like = False
                         if only_followers:
                             my_uid = self.config["bilibili"].get("uid")
                             if my_uid:
                                 is_follower = self.check_is_follower(comment.uid, my_uid)
                                 if not is_follower:
                                     self.logger.info(f"[点赞视频] 用户 {comment.user} 未关注你，跳过点赞视频")
-                                    delay = self.config["reply"].get("reply_delay", 2)
-                                    if delay > 0:
-                                        time.sleep(delay)
-                                    continue
+                                    skip_like = True
                             else:
                                 self.logger.warning("[点赞视频] 未配置 uid，无法检查粉丝关系，跳过点赞视频")
-                                delay = self.config["reply"].get("reply_delay", 2)
-                                if delay > 0:
-                                    time.sleep(delay)
-                                continue
+                                skip_like = True
 
-                        latest_video = self.get_user_latest_video(comment.uid)
-                        if latest_video:
-                            if self.like_video(latest_video["bvid"]):
-                                self.logger.info(f"[点赞视频] ✓ 成功点赞用户 {comment.user} 的最新视频")
+                        if not skip_like:
+                            latest_video = self.get_user_latest_video(comment.uid)
+                            if latest_video:
+                                if self.like_video(latest_video["bvid"]):
+                                    self.logger.info(f"[点赞视频] ✓ 成功点赞用户 {comment.user} 的最新视频")
+                                else:
+                                    self.logger.warning(f"[点赞视频] ✗ 点赞用户 {comment.user} 的最新视频失败")
                             else:
-                                self.logger.warning(f"[点赞视频] ✗ 点赞用户 {comment.user} 的最新视频失败")
-                        else:
-                            self.logger.warning(f"[点赞视频] 用户 {comment.user} 没有视频或获取失败")
+                                self.logger.warning(f"[点赞视频] 用户 {comment.user} 没有视频或获取失败")
 
                     delay = self.config["reply"].get("reply_delay", 2)
                     if delay > 0:

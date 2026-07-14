@@ -78,6 +78,23 @@ DEFAULT_CONFIG = {
         "like_user_video_only_followers": False,
         "chained_reply_enabled": True,
         "max_reply_depth": 3,
+        "keyword_filter": {
+            "enabled": False,
+            "whitelist": "",
+            "blacklist": "",
+            "mode": "any",
+            "match_case": False,
+        },
+        "length_filter": {
+            "enabled": False,
+            "min_length": 0,
+            "max_length": 500,
+        },
+        "user_filter": {
+            "enabled": False,
+            "whitelist": "",
+            "blacklist": "",
+        },
     },
     "logging": {
         "level": "INFO",
@@ -1181,6 +1198,12 @@ class BiliCommentBot:
                     self.logger.debug(f"跳过自己的评论: {comment.comment_id}")
                     continue
 
+                # 应用过滤器（关键词、长度、用户黑白名单）
+                passed, reason = self._check_filters(comment)
+                if not passed:
+                    self.logger.debug(f"跳过评论 {comment.comment_id}: {reason}")
+                    continue
+
                 self.logger.info(f"处理评论: [{comment.user}] {comment.content[:40]}... (深度: {comment.depth})")
 
                 # 构建上下文
@@ -1260,6 +1283,68 @@ class BiliCommentBot:
                     delay = self.config["reply"].get("reply_delay", 2)
                     if delay > 0:
                         time.sleep(delay)
+
+    def _check_filters(self, comment: Comment) -> tuple:
+        """检查评论是否通过所有过滤器。返回 (通过, 跳过原因)"""
+        # ── 长度过滤 ──
+        lf = self.config["reply"].get("length_filter", {})
+        if lf.get("enabled", False):
+            min_len = lf.get("min_length", 0)
+            max_len = lf.get("max_length", 500)
+            content_len = len(comment.content)
+            if min_len > 0 and content_len < min_len:
+                return False, f"评论长度 {content_len} < {min_len}"
+            if max_len > 0 and content_len > max_len:
+                return False, f"评论长度 {content_len} > {max_len}"
+
+        # ── 关键词过滤 ──
+        kf = self.config["reply"].get("keyword_filter", {})
+        if kf.get("enabled", False):
+            wl_str = kf.get("whitelist", "").strip()
+            bl_str = kf.get("blacklist", "").strip()
+            match_case = kf.get("match_case", False)
+            content = comment.content if match_case else comment.content.lower()
+
+            # 黑名单
+            if bl_str:
+                keywords = [k.strip() for k in bl_str.split(",") if k.strip()]
+                if not match_case:
+                    keywords = [k.lower() for k in keywords]
+                for kw in keywords:
+                    if kw in content:
+                        return False, f"命中黑名单关键词: {kw}"
+
+            # 白名单
+            if wl_str:
+                keywords = [k.strip() for k in wl_str.split(",") if k.strip()]
+                if not match_case:
+                    keywords = [k.lower() for k in keywords]
+                mode = kf.get("mode", "any")
+                if mode == "all":
+                    if not all(kw in content for kw in keywords):
+                        return False, "未包含所有白名单关键词"
+                else:
+                    if not any(kw in content for kw in keywords):
+                        return False, "未包含任何白名单关键词"
+
+        # ── 用户过滤 ──
+        uf = self.config["reply"].get("user_filter", {})
+        if uf.get("enabled", False):
+            uid = comment.uid
+            bl_str = uf.get("blacklist", "").strip()
+            wl_str = uf.get("whitelist", "").strip()
+
+            if bl_str:
+                blacklist = [u.strip() for u in bl_str.split(",") if u.strip()]
+                if uid in blacklist:
+                    return False, f"用户 {uid} 在黑名单中"
+
+            if wl_str:
+                whitelist = [u.strip() for u in wl_str.split(",") if u.strip()]
+                if uid not in whitelist:
+                    return False, f"用户 {uid} 不在白名单中"
+
+        return True, ""
 
     def get_stats(self) -> dict:
         return {

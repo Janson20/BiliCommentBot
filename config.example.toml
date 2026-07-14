@@ -82,6 +82,37 @@ chained_reply_enabled = true
 # 最大回复深度（层数），设置楼中楼回复的最大嵌套层数
 max_reply_depth = 3
 
+# 关键词过滤
+[reply.keyword_filter]
+# 启用关键词过滤
+enabled = false
+# 白名单关键词（逗号分隔），评论必须匹配才回复；留空则不限制
+whitelist = ""
+# 黑名单关键词（逗号分隔），匹配任一则跳过
+blacklist = "广告,加我,微信"
+# 白名单匹配模式：any（任一匹配）或 all（全部匹配）
+mode = "any"
+# 是否区分大小写
+match_case = false
+
+# 评论长度过滤
+[reply.length_filter]
+# 启用长度过滤
+enabled = false
+# 最短长度（0=不限制）
+min_length = 2
+# 最长长度（0=不限制）
+max_length = 500
+
+# 用户过滤
+[reply.user_filter]
+# 启用用户过滤
+enabled = false
+# 白名单 UID（逗号分隔），仅回复这些用户
+whitelist = ""
+# 黑名单 UID（逗号分隔），屏蔽这些用户
+blacklist = ""
+
 # 日志配置
 [logging]
 # 日志级别（DEBUG, INFO, WARNING, ERROR）

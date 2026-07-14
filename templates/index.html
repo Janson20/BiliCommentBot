@@ -410,6 +410,87 @@
             <div class="form-hint">留空则回复所有视频的评论；填写后仅回复该指定视频的评论</div>
           </div>
         </div>
+
+        <!-- 关键词过滤 -->
+        <div class="card">
+          <div class="card-title">🔍 关键词过滤</div>
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-reply-keyword_filter-enabled">
+              启用关键词过滤
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="form-label">白名单关键词（逗号分隔）</label>
+            <textarea class="form-textarea" id="cfg-reply-keyword_filter-whitelist" rows="2" placeholder="谢谢,请问,好看"></textarea>
+            <div class="form-hint">评论必须包含至少一个白名单关键词才回复（留空=不限制）</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">黑名单关键词（逗号分隔）</label>
+            <textarea class="form-textarea" id="cfg-reply-keyword_filter-blacklist" rows="2" placeholder="广告,加我,微信"></textarea>
+            <div class="form-hint">包含任一黑名单关键词的评论跳过</div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">白名单匹配模式</label>
+              <select class="form-select" id="cfg-reply-keyword_filter-mode">
+                <option value="any">any（任一匹配）</option>
+                <option value="all">all（全部匹配）</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-check" style="margin-top:28px">
+                <input type="checkbox" id="cfg-reply-keyword_filter-match_case">
+                区分大小写
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- 评论长度过滤 -->
+        <div class="card">
+          <div class="card-title">📏 评论长度过滤</div>
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-reply-length_filter-enabled">
+              启用长度过滤
+            </label>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">最短长度</label>
+              <input class="form-input" type="number" id="cfg-reply-length_filter-min_length" value="0" min="0">
+              <div class="form-hint">低于此字数的评论跳过（0=不限制）</div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">最长长度</label>
+              <input class="form-input" type="number" id="cfg-reply-length_filter-max_length" value="500" min="0">
+              <div class="form-hint">超出此字数的评论跳过（0=不限制）</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 用户过滤 -->
+        <div class="card">
+          <div class="card-title">👤 用户过滤</div>
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" id="cfg-reply-user_filter-enabled">
+              启用用户过滤
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="form-label">白名单 UID（逗号分隔）</label>
+            <input class="form-input" id="cfg-reply-user_filter-whitelist" placeholder="如：123456,789012">
+            <div class="form-hint">仅回复这些 UID 的评论（留空=不限制）</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">黑名单 UID（逗号分隔）</label>
+            <input class="form-input" id="cfg-reply-user_filter-blacklist" placeholder="如：666666,888888">
+            <div class="form-hint">屏蔽这些 UID 的评论</div>
+          </div>
+        </div>
+
       </div>
 
       <!-- Rate Limit -->
@@ -831,6 +912,26 @@ function loadConfig() {
     set('cfg-reply-prefix', r.prefix);
     set('cfg-reply-only_bvid', r.only_bvid);
 
+    // 关键词过滤
+    const kf = r.keyword_filter || {};
+    set('cfg-reply-keyword_filter-enabled', kf.enabled);
+    set('cfg-reply-keyword_filter-whitelist', kf.whitelist);
+    set('cfg-reply-keyword_filter-blacklist', kf.blacklist);
+    set('cfg-reply-keyword_filter-mode', kf.mode);
+    set('cfg-reply-keyword_filter-match_case', kf.match_case);
+
+    // 长度过滤
+    const lf = r.length_filter || {};
+    set('cfg-reply-length_filter-enabled', lf.enabled);
+    set('cfg-reply-length_filter-min_length', lf.min_length);
+    set('cfg-reply-length_filter-max_length', lf.max_length);
+
+    // 用户过滤
+    const uf = r.user_filter || {};
+    set('cfg-reply-user_filter-enabled', uf.enabled);
+    set('cfg-reply-user_filter-whitelist', uf.whitelist);
+    set('cfg-reply-user_filter-blacklist', uf.blacklist);
+
     const rl = cfg.rate_limit || {};
     set('cfg-rate_limit-min_request_interval', rl.min_request_interval);
     set('cfg-rate_limit-max_retries', rl.max_retries);
@@ -894,6 +995,24 @@ function saveConfig() {
       max_reply_depth: get('cfg-reply-max_reply_depth'),
       prefix: get('cfg-reply-prefix'),
       only_bvid: get('cfg-reply-only_bvid'),
+
+      keyword_filter: {
+        enabled: get('cfg-reply-keyword_filter-enabled'),
+        whitelist: get('cfg-reply-keyword_filter-whitelist'),
+        blacklist: get('cfg-reply-keyword_filter-blacklist'),
+        mode: get('cfg-reply-keyword_filter-mode'),
+        match_case: get('cfg-reply-keyword_filter-match_case'),
+      },
+      length_filter: {
+        enabled: get('cfg-reply-length_filter-enabled'),
+        min_length: get('cfg-reply-length_filter-min_length'),
+        max_length: get('cfg-reply-length_filter-max_length'),
+      },
+      user_filter: {
+        enabled: get('cfg-reply-user_filter-enabled'),
+        whitelist: get('cfg-reply-user_filter-whitelist'),
+        blacklist: get('cfg-reply-user_filter-blacklist'),
+      },
     },
     rate_limit: {
       min_request_interval: get('cfg-rate_limit-min_request_interval'),

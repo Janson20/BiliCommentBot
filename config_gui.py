@@ -393,14 +393,14 @@ class ConfigEditor:
         ttk.Label(frame, text="API基础URL:").pack(anchor=tk.W)
         base_url_entry = ttk.Entry(frame, width=60)
         base_url_entry.pack(fill=tk.X, pady=(0, 10))
-        base_url_entry.insert(0, self.get_value("deepseek", "base_url", "https://api.deepseek.com/v1"))
+        base_url_entry.insert(0, self.get_value("deepseek", "base_url", "https://api.deepseek.com"))
         self.widgets["deepseek.base_url"] = (base_url_entry, "string")
         
         # 模型
         ttk.Label(frame, text="使用的模型:").pack(anchor=tk.W)
         model_entry = ttk.Entry(frame, width=40)
         model_entry.pack(anchor=tk.W, pady=(0, 10))
-        model_entry.insert(0, self.get_value("deepseek", "model", "deepseek-chat"))
+        model_entry.insert(0, self.get_value("deepseek", "model", "deepseek-v4-flash"))
         self.widgets["deepseek.model"] = (model_entry, "string")
         
         # 最大回复长度

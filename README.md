@@ -243,8 +243,8 @@ docker run -d \
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `api_key` | DeepSeek API 密钥 | - |
-| `base_url` | API 基础 URL | https://api.deepseek.com/v1 |
-| `model` | 使用的模型 | deepseek-chat |
+| `base_url` | API 基础 URL | https://api.deepseek.com |
+| `model` | 使用的模型 | deepseek-v4-flash |
 | `max_tokens` | 最大回复长度 | 200 |
 | `temperature` | 温度参数（0-1） | 0.7 |
 | `system_prompt` | 系统提示词，定义 AI 回复风格 | 友善的 B 站 UP 主 |
@@ -327,8 +327,8 @@ max_video_pages = 10
 
 [deepseek]
 api_key = "sk-xxx"
-base_url = "https://api.deepseek.com/v1"
-model = "deepseek-chat"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
 max_tokens = 200
 temperature = 0.7
 system_prompt = "你是一个友善的B站游戏区Minecraft UP主，请对评论做出自然、友好的回复。回复要简洁明了，控制在100字以内。"

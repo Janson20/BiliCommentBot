@@ -46,8 +46,8 @@ max_video_pages = 10
 
 [deepseek]
 api_key = "你的DeepSeek API密钥"
-base_url = "https://api.deepseek.com/v1"
-model = "deepseek-chat"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
 max_tokens = 200
 temperature = 0.7
 system_prompt = "你是一个友善的B站游戏区Minecraft UP主，请对评论做出自然、友好的回复。回复要简洁明了，控制在100字以内。"

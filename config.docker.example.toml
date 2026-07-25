@@ -48,9 +48,9 @@ cache_file = "video_cache.json"
 # DeepSeek API密钥
 api_key = "sk-xxx"
 # API基础URL
-base_url = "https://api.deepseek.com/v1"
+base_url = "https://api.deepseek.com"
 # 使用的模型
-model = "deepseek-chat"
+model = "deepseek-v4-flash"
 # 最大回复长度
 max_tokens = 200
 # 温度参数（0-1，控制回复的随机性）
